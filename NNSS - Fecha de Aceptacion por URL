@@ -1,0 +1,121 @@
+// ==UserScript==
+// @name         NNSS - Fecha de Aceptacion por URL
+// @namespace    sf-control-plazos
+// @version      1.1.0
+// @description  Lee "Fecha de Aceptación" cada vez que cambia el Record__c en la URL y actualiza la cache siempre
+// @match        https://*.lightning.force.com/*
+// @match        https://*.my.salesforce.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    const LABEL = "Fecha de Aceptación";
+
+    const clean = s => s?.replace(/\u00A0/g, " ")
+                         .replace(/[ \t\r\n]+/g, " ")
+                         .trim() || "";
+
+    function deepQueryAll(root, selector, cap = 20000) {
+        const out = [];
+        const seen = new Set();
+        const stack = [root];
+        let left = cap;
+
+        while (stack.length && left-- > 0) {
+            const n = stack.pop();
+            if (!n || seen.has(n)) continue;
+            seen.add(n);
+
+            try {
+                if (n.querySelectorAll) {
+                    out.push(...n.querySelectorAll(selector));
+                }
+            } catch {}
+
+            const ch = n.children || n.childNodes;
+            if (ch) {
+                for (let i = 0; i < ch.length; i++) stack.push(ch[i]);
+            }
+        }
+        return out;
+    }
+
+    function readFechaAceptacion() {
+        const blocks = deepQueryAll(document, ".slds-form-element");
+        for (const el of blocks) {
+            const lab = el.querySelector(".test-id__field-label, label");
+            if (!lab) continue;
+            const labText = clean(lab.textContent);
+            if (labText !== LABEL) continue;
+
+            const valRoot = el.querySelector(".test-id__field-value, .slds-form-element__control");
+            if (!valRoot) continue;
+
+            const txt = clean(valRoot.innerText || valRoot.textContent || "");
+            return txt || null;
+        }
+        return null;
+    }
+
+    // Clave de URL: parte con Record__c/ID/view, si no existe se usa href completo
+    function getUrlKey() {
+        const m = location.href.match(/\/Record__c\/([a-zA-Z0-9]{15,18})\/view/i);
+        if (m) return "Record__c:" + m[1];
+        return "URL:" + location.href;
+    }
+
+    let lastUrlKey = null;
+    let scanInProgress = false;
+
+    function scanForCurrentUrl(reason) {
+        if (scanInProgress) return;
+        scanInProgress = true;
+
+        const urlKey = getUrlKey();
+        let attempts = 0;
+        const maxAttempts = 10;
+        const delayMs = 700;
+
+        function attempt() {
+            attempts++;
+            const valor = readFechaAceptacion();
+
+            if (valor) {
+                window.CONTROL_PLAZOS_FECHA_ACEPTACION = valor;
+                console.log("[Control Plazos] URL:", urlKey, "| Fecha de Aceptacion:", valor, "| origen:", reason, "| intentos:", attempts);
+                scanInProgress = false;
+                return;
+            }
+
+            if (attempts < maxAttempts) {
+                setTimeout(attempt, delayMs);
+            } else {
+                window.CONTROL_PLAZOS_FECHA_ACEPTACION = null;
+                console.log("[Control Plazos] URL:", urlKey, "| Fecha de Aceptacion no encontrada tras", attempts, "intentos");
+                scanInProgress = false;
+            }
+        }
+
+        attempt();
+    }
+
+    function checkUrlChange() {
+        const currentKey = getUrlKey();
+        if (currentKey !== lastUrlKey) {
+            lastUrlKey = currentKey;
+            scanForCurrentUrl("cambio de URL");
+        }
+    }
+
+    // Comprobacion periodica de cambios de URL
+    setInterval(checkUrlChange, 800);
+
+    // Primer escaneo al cargar
+    setTimeout(() => {
+        lastUrlKey = getUrlKey();
+        scanForCurrentUrl("inicio");
+    }, 2000);
+
+    console.log("[Control Plazos] Script Fecha de Aceptacion por URL cargado");
+})();
