@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fecha de Aceptacion
 // @namespace    sf-control-plazos
-// @version      1.3.1
+// @version      1.3.2
 // @description  Lee "Fecha de Aceptación" SOLO en Record__c. Detecta cambios por URL y por pestaña activa (Console). Cache unico persistente (sessionStorage).
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
@@ -201,7 +201,7 @@
     if (DEBUG_CACHE_EVERY_MS > 0) {
         setInterval(() => {
             console.log(
-                "[Control Plazos][CACHE]",
+                "[Control Plazos][CACHE] Fecha de aceptacion",
                 window.CONTROL_PLAZOS_FECHA_ACEPTACION
             );
         }, DEBUG_CACHE_EVERY_MS);
