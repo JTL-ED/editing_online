@@ -9,20 +9,23 @@
 // @grant        none
 // ==/UserScript==
 
-//nota:  por URL (Constructive_project__c + tabs)
 (function () {
-    const ONLY_OBJECT_API = "Constructive_project__c";
-    const RELATED_LIST_TITLE = "Pre-requisitos";
+    const OBJECT_API = "Constructive_project__c";
+    const RELATED_LIST_API = "Prerequisites__r";
     const COL_LABEL = "Fecha real fin";
 
-    // Cache: por registro (JSON en sessionStorage)
-    const STORAGE_KEY = "CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN_MAP";
-
-    // Debug
+    const STORAGE_KEY = "CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN";
     const DEBUG_CACHE_EVERY_MS = 5000;
 
-    // Exponer ultimo valor del registro activo
-    window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = null;
+    // -------------------------
+    // RESTAURAR CACHE tras F5
+    // -------------------------
+    if (sessionStorage.getItem(STORAGE_KEY)) {
+        window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = sessionStorage.getItem(STORAGE_KEY);
+        console.log("[Control Plazos] Cache restaurado desde sessionStorage:", window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN);
+    } else {
+        window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = null;
+    }
 
     const clean = s => (s ?? "")
         .replace(/\u00A0/g, " ")
@@ -36,67 +39,33 @@
         return r && r.length > 0;
     }
 
-    function getMap() {
-        try {
-            const raw = sessionStorage.getItem(STORAGE_KEY);
-            if (!raw) return {};
-            const obj = JSON.parse(raw);
-            return (obj && typeof obj === "object") ? obj : {};
-        } catch {
-            return {};
+    function deepQueryAll(root, selector, cap = 30000) {
+        const out = [];
+        const seen = new Set();
+        const stack = [root];
+        let left = cap;
+
+        while (stack.length && left-- > 0) {
+            const n = stack.pop();
+            if (!n || seen.has(n)) continue;
+            seen.add(n);
+
+            try {
+                if (n.querySelectorAll) {
+                    const found = n.querySelectorAll(selector);
+                    for (const el of found) out.push(el);
+                }
+            } catch {}
+
+            const ch = n.children || n.childNodes;
+            if (ch) for (let i = 0; i < ch.length; i++) stack.push(ch[i]);
         }
+        return out;
     }
 
-    function setMap(map) {
-        try {
-            sessionStorage.setItem(STORAGE_KEY, JSON.stringify(map || {}));
-        } catch {}
-    }
-
-    function setCachedValueFor(key, value) {
-        const map = getMap();
-        map[key] = value;
-        setMap(map);
-    }
-
-    function getCachedValueFor(key) {
-        const map = getMap();
-        return map[key] || null;
-    }
-
-    function parseDateEs(s) {
-        const t = clean(s);
-        const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-        if (!m) return null;
-        const d = parseInt(m[1], 10);
-        const mo = parseInt(m[2], 10);
-        const y = parseInt(m[3], 10);
-        if (!d || !mo || !y) return null;
-        const dt = new Date(y, mo - 1, d);
-        if (dt.getFullYear() !== y || dt.getMonth() !== (mo - 1) || dt.getDate() !== d) return null;
-        return dt;
-    }
-
-    function formatDateEs(dt) {
-        const dd = String(dt.getDate()).padStart(2, "0");
-        const mm = String(dt.getMonth() + 1).padStart(2, "0");
-        const yy = String(dt.getFullYear());
-        return `${dd}/${mm}/${yy}`;
-    }
-
-    // -------------
-    // Contexto (URL + tabs console)
-    // -------------
-    function isRecordPageByUrl() {
-        return new RegExp(`/lightning/r/${ONLY_OBJECT_API}/[a-zA-Z0-9]{15,18}/view`, "i").test(location.href);
-    }
-
-    function getRecordIdFromUrl() {
-        const re = new RegExp(`/lightning/r/${ONLY_OBJECT_API}/([a-zA-Z0-9]{15,18})/view`, "i");
-        const m = location.href.match(re);
-        return m ? m[1] : null;
-    }
-
+    // -------------------------
+    // CONTEXTO: URL / pestaana activa (Console)
+    // -------------------------
     function getVisibleTabPanel() {
         return (
             document.querySelector('.slds-tabs_default__content[aria-hidden="false"]') ||
@@ -112,7 +81,16 @@
         return document;
     }
 
-    function getActiveRecordIdFromDom() {
+    function isProjectPageByUrl() {
+        return new RegExp(`/lightning/r/${OBJECT_API}/[a-zA-Z0-9]{15,18}/`, "i").test(location.href);
+    }
+
+    function getProjectIdFromUrl() {
+        const m = location.href.match(new RegExp(`/lightning/r/${OBJECT_API}/([a-zA-Z0-9]{15,18})/`, "i"));
+        return m ? m[1] : null;
+    }
+
+    function getProjectIdFromDom() {
         const root = getActiveRoot();
 
         const layout = root.querySelector('records-record-layout');
@@ -134,152 +112,175 @@
             }
         }
 
-        const a = root.querySelector(`a[href*="/lightning/r/${ONLY_OBJECT_API}/"]`);
+        const a = root.querySelector(`a[href*="/lightning/r/${OBJECT_API}/"]`);
         if (a) {
-            const href = a.getAttribute("href") || "";
-            const m = href.match(new RegExp(`/${ONLY_OBJECT_API}/([a-zA-Z0-9]{15,18})/view`, "i"));
+            const m = a.getAttribute("href")?.match(new RegExp(`/${OBJECT_API}/([a-zA-Z0-9]{15,18})/`, "i"));
             if (m) return m[1];
         }
-
         return null;
     }
 
     function getUrlKey() {
-        const rid = getRecordIdFromUrl();
-        return rid ? `${ONLY_OBJECT_API}:${rid}` : null;
+        const rid = getProjectIdFromUrl();
+        return rid ? (OBJECT_API + ":" + rid) : null;
     }
 
-    function getActiveDomKey() {
-        const rid = getActiveRecordIdFromDom();
-        return rid ? `${ONLY_OBJECT_API}:${rid}` : null;
+    function getDomKey() {
+        const rid = getProjectIdFromDom();
+        return rid ? (OBJECT_API + ":" + rid) : null;
     }
 
-    // -------------
-    // Lectura de la tabla "Pre-requisitos" -> max Fecha real fin
-    // -------------
-    function getTableTitle(table) {
-        // Intentar encontrar el titulo del bloque/carta que contiene la tabla
-        const container =
-            table.closest('article') ||
-            table.closest('section') ||
-            table.closest('div.slds-card') ||
-            table.parentElement;
-
-        if (!container) return "";
-
-        const candidates = container.querySelectorAll('h2, header, .slds-card__header, .slds-card__header-title, span');
-        for (const el of candidates) {
-            if (!isVisible(el)) continue;
-            const t = clean(el.textContent);
-            if (t) return t;
-        }
-        return "";
+    function isRelatedListPrereqUrl() {
+        return new RegExp(`/lightning/r/${OBJECT_API}/[a-zA-Z0-9]{15,18}/related/${RELATED_LIST_API}/view`, "i")
+            .test(location.href);
     }
 
-    function findPreReqTable(root) {
-        const tables = Array.from(root.querySelectorAll("table")).filter(isVisible);
-        if (!tables.length) return null;
+    // -------------------------
+    // PARSEO FECHAS dd/mm/yyyy
+    // -------------------------
+    function parseDateDMY(s) {
+        const t = clean(s);
+        const m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!m) return null;
+        const dd = parseInt(m[1], 10);
+        const mm = parseInt(m[2], 10);
+        const yy = parseInt(m[3], 10);
+        if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
 
-        let best = null;
-        let bestScore = -1;
+        const d = new Date(yy, mm - 1, dd);
+        if (d.getFullYear() !== yy || d.getMonth() !== (mm - 1) || d.getDate() !== dd) return null;
+        return d;
+    }
 
-        for (const table of tables) {
-            // headers
-            const ths = Array.from(table.querySelectorAll("thead th")).filter(isVisible);
-            if (!ths.length) continue;
+    function formatDMY(d) {
+        const dd = String(d.getDate()).padStart(2, "0");
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const yy = d.getFullYear();
+        return `${dd}/${mm}/${yy}`;
+    }
 
-            const headers = ths.map(th => clean(th.innerText || th.textContent));
-            const hasFecha = headers.some(h => h === COL_LABEL);
-            if (!hasFecha) continue;
+    // -------------------------
+    // LECTURA TABLA: columna "Fecha real fin" -> max
+    // Soporta:
+    // - table tradicional (thead/tbody)
+    // - lightning datatable (roles grid/row/gridcell)
+    // -------------------------
+    function getColumnIndexByHeaderText(root, headerText) {
+        // Caso 1: headers con role columnheader (datatable)
+        const headers = deepQueryAll(root, '[role="columnheader"]')
+            .filter(h => isVisible(h))
+            .map(h => ({ el: h, text: clean(h.innerText || h.textContent || "") }));
 
-            const title = getTableTitle(table);
-            const score =
-                (title.includes(RELATED_LIST_TITLE) ? 10 : 0) +
-                (headers.includes("Nombre del Pre-requisito") ? 3 : 0) +
-                (headers.includes("Fecha de inicio") ? 1 : 0);
-
-            if (score > bestScore) {
-                bestScore = score;
-                best = table;
+        if (headers.length) {
+            for (let i = 0; i < headers.length; i++) {
+                if (headers[i].text === headerText) return i;
             }
         }
 
-        return best;
-    }
+        // Caso 2: th en table
+        const ths = deepQueryAll(root, 'th')
+            .filter(th => isVisible(th))
+            .map(th => ({ el: th, text: clean(th.innerText || th.textContent || "") }));
 
-    function readUltimaFechaRealFin(root) {
-        const table = findPreReqTable(root);
-        if (!table) return null;
+        if (ths.length) {
+            // Solo los del thead si existe
+            const thead = root.querySelector("thead");
+            const thInHead = thead ? Array.from(thead.querySelectorAll("th")).filter(isVisible) : [];
+            const list = thInHead.length ? thInHead : ths.map(x => x.el);
 
-        const ths = Array.from(table.querySelectorAll("thead th"));
-        let idx = -1;
-        for (let i = 0; i < ths.length; i++) {
-            const h = clean(ths[i].innerText || ths[i].textContent);
-            if (h === COL_LABEL) {
-                idx = i;
-                break;
-            }
-        }
-        if (idx < 0) return null;
-
-        let maxDt = null;
-
-        const rows = Array.from(table.querySelectorAll("tbody tr"));
-        for (const row of rows) {
-            if (!isVisible(row)) continue;
-
-            // En lightning, cada fila puede tener mezcla de th/td
-            const cells = Array.from(row.querySelectorAll("th,td"));
-            if (cells.length <= idx) continue;
-
-            const txt = clean(cells[idx].innerText || cells[idx].textContent);
-            if (!txt) continue;
-
-            const dt = parseDateEs(txt);
-            if (!dt) continue;
-
-            if (!maxDt || dt.getTime() > maxDt.getTime()) {
-                maxDt = dt;
+            for (let i = 0; i < list.length; i++) {
+                const t = clean(list[i].innerText || list[i].textContent || "");
+                if (t === headerText) return i;
             }
         }
 
-        if (!maxDt) return null;
-        return formatDateEs(maxDt);
+        return -1;
     }
 
-    // -------------
-    // Escaneo con reintentos + cambio de contexto
-    // -------------
+    function readMaxFechaRealFin(root) {
+        const colIdx = getColumnIndexByHeaderText(root, COL_LABEL);
+        if (colIdx < 0) return null;
+
+        const dates = [];
+
+        // Caso A: grid/roles (LWC datatable)
+        const rows = deepQueryAll(root, '[role="row"]')
+            .filter(r => isVisible(r));
+
+        if (rows.length) {
+            for (const row of rows) {
+                // Saltar filas de cabecera: suelen contener columnheader dentro
+                if (row.querySelector('[role="columnheader"]')) continue;
+
+                const cells = Array.from(row.querySelectorAll('[role="gridcell"]'))
+                    .filter(c => isVisible(c));
+
+                if (cells.length > colIdx) {
+                    const txt = clean(cells[colIdx].innerText || cells[colIdx].textContent || "");
+                    const d = parseDateDMY(txt);
+                    if (d) dates.push(d);
+                }
+            }
+        }
+
+        // Caso B: table normal
+        const tableRows = deepQueryAll(root, "tbody tr").filter(r => isVisible(r));
+        if (tableRows.length) {
+            for (const tr of tableRows) {
+                const tds = Array.from(tr.querySelectorAll("td")).filter(td => isVisible(td));
+                if (tds.length > colIdx) {
+                    const txt = clean(tds[colIdx].innerText || tds[colIdx].textContent || "");
+                    const d = parseDateDMY(txt);
+                    if (d) dates.push(d);
+                }
+            }
+        }
+
+        if (!dates.length) return null;
+
+        let max = dates[0];
+        for (let i = 1; i < dates.length; i++) {
+            if (dates[i].getTime() > max.getTime()) max = dates[i];
+        }
+        return formatDMY(max);
+    }
+
+    // -------------------------
+    // SCAN con reintentos (carga async)
+    // -------------------------
     let scanToken = 0;
 
     function scanForCurrent(reason) {
         const urlKey = getUrlKey();
-        const domKey = getActiveDomKey();
-        if (!urlKey && !domKey && !isRecordPageByUrl()) return;
+        const domKey = getDomKey();
 
-        const key = domKey || urlKey || `${ONLY_OBJECT_API}:?`;
+        if (!isProjectPageByUrl() && !urlKey && !domKey) return;
+
         const token = ++scanToken;
+        const keyForLog = domKey || urlKey || (OBJECT_API + ":?");
 
         let attempts = 0;
-        const maxAttempts = 18;
-        const delayMs = 800;
-
-        // Cargar cache si existe (para que haya valor inmediato)
-        const cached = getCachedValueFor(key);
-        if (cached) {
-            window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = cached;
-        }
+        const maxAttempts = 14;
+        const delayMs = 700;
 
         function attempt() {
             if (token !== scanToken) return;
 
             attempts++;
-            const valor = readUltimaFechaRealFin(getActiveRoot());
+
+            const root = getActiveRoot();
+            const valor = readMaxFechaRealFin(root);
 
             if (valor) {
                 window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = valor;
-                setCachedValueFor(key, valor);
-                console.log("[Control Plazos] Key:", key, "| Ultima Fecha real fin:", valor, "| origen:", reason, "| intentos:", attempts);
+                sessionStorage.setItem(STORAGE_KEY, valor);
+
+                console.log(
+                    "[Control Plazos] Key:", keyForLog,
+                    "| Ultima Fecha real fin:", valor,
+                    "| origen:", reason,
+                    "| vista:", (isRelatedListPrereqUrl() ? "related/Prerequisites__r" : "view")
+                );
                 return;
             }
 
@@ -289,31 +290,40 @@
         attempt();
     }
 
+    // -------------------------
+    // Detectar cambio de contexto: URL + pestaana visible
+    // -------------------------
     let lastUrlKey = null;
     let lastDomKey = null;
+    let lastHref = location.href;
 
     setInterval(() => {
         const u = getUrlKey();
-        const d = getActiveDomKey();
-        if ((u && u !== lastUrlKey) || (d && d !== lastDomKey)) {
+        const d = getDomKey();
+        const href = location.href;
+
+        if (href !== lastHref || (u && u !== lastUrlKey) || (d && d !== lastDomKey)) {
+            lastHref = href;
             lastUrlKey = u;
             lastDomKey = d;
             scanForCurrent("cambio contexto");
         }
     }, 800);
 
+    // Primer scan
     setTimeout(() => {
         lastUrlKey = getUrlKey();
-        lastDomKey = getActiveDomKey();
+        lastDomKey = getDomKey();
+        lastHref = location.href;
         scanForCurrent("inicio");
     }, 2000);
 
+    // Debug cache
     if (DEBUG_CACHE_EVERY_MS > 0) {
         setInterval(() => {
-            const key = getActiveDomKey() || getUrlKey() || `${ONLY_OBJECT_API}:?`;
-            console.log("[Control Plazos][CACHE]", "Key:", key, "|", window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN);
+            console.log("[Control Plazos][CACHE]", window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN);
         }, DEBUG_CACHE_EVERY_MS);
     }
 
-    console.log("[Control Plazos] Script Ultima Fecha real fin (Pre-requisitos) cargado (persistente)");
+    console.log("[Control Plazos] Script Ultima Fecha Real Fin cargado (persistente)");
 })();
