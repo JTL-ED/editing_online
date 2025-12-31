@@ -1,5 +1,6 @@
 // ==UserScript==
-// @name         NNSS - Fecha de Aceptacion por URL (Record__c only + tabs + persist)
+// @name         NNSS - Fecha de Aceptacion por URL
+//nota           Record__c only + tabs + persiste cache 
 // @namespace    sf-control-plazos
 // @version      1.3.1
 // @description  Lee "Fecha de Aceptación" SOLO en Record__c. Detecta cambios por URL y por pestaña activa (Console). Cache unico persistente (sessionStorage).
