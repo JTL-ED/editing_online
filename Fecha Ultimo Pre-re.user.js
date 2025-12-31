@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
-// @version      1.0.0
+// @version      1.1.0
 // @description  Detecta la tabla relacionada (Nombre del Pre-requisito) y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en la pestaña visible. Guarda en sessionStorage y borra cache si no hay fecha.
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
