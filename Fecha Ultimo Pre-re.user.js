@@ -9,20 +9,23 @@
 // @grant        none
 // ==/UserScript==
 
+//nota:  por URL (Constructive_project__c + tabs)
+
 (function () {
     const OBJECT_API = "Constructive_project__c";
     const RELATED_API = "Prerequisites__r";
-    const RELATED_LABEL_FALLBACK = "Pre-requisitos";
-    const HEADER_TARGET = "Fecha real fin";
+    const LABEL_COL = "Fecha real fin";
 
-    const STORAGE_PREFIX = "CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN::";
-
-    // Debug
+    const STORAGE_PREFIX = "CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN::"; // + recordId
     const DEBUG_CACHE_EVERY_MS = 5000;
 
-    const clean = s => s?.replace(/\u00A0/g, " ")
-                         .replace(/[ \t\r\n]+/g, " ")
-                         .trim() || "";
+    // Variable global (por si quieres leerlo desde consola)
+    window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN || null;
+
+    const clean = s => (s || "")
+        .replace(/\u00A0/g, " ")
+        .replace(/[ \t\r\n]+/g, " ")
+        .trim();
 
     function isVisible(el) {
         if (!el || el.nodeType !== 1) return false;
@@ -55,7 +58,7 @@
         return out;
     }
 
-    function isConstructiveProjectPageByUrl() {
+    function isConstructiveUrl() {
         return new RegExp(`/lightning/r/${OBJECT_API}/[a-zA-Z0-9]{15,18}/`, "i").test(location.href);
     }
 
@@ -74,9 +77,7 @@
     }
 
     function getActiveRoot() {
-        const tabPanel = getVisibleTabPanel();
-        if (tabPanel) return tabPanel;
-        return document;
+        return getVisibleTabPanel() || document;
     }
 
     function getActiveRecordIdFromDom() {
@@ -109,159 +110,165 @@
         return null;
     }
 
-    function getContextKey() {
-        const rid = getActiveRecordIdFromDom() || getRecordIdFromUrl();
-        return rid ? `${OBJECT_API}:${rid}` : null;
+    function getContextRecordId() {
+        return getActiveRecordIdFromDom() || getRecordIdFromUrl();
     }
 
-    function getStorageKey() {
-        const rid = getActiveRecordIdFromDom() || getRecordIdFromUrl();
-        return rid ? (STORAGE_PREFIX + rid) : null;
+    function storageKeyFor(recordId) {
+        return STORAGE_PREFIX + recordId;
     }
 
-    // Restaura cache por registro si existe
-    function restoreCacheIfAny() {
-        const sk = getStorageKey();
-        if (!sk) return;
-        const cached = sessionStorage.getItem(sk);
-        if (cached) {
-            window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = cached;
-            console.log("[Control Plazos] Cache restaurado:", getContextKey(), "| Fecha real fin:", cached);
+    // -------------------------
+    // Restaurar cache por registro si ya estabas en ese registro (F5)
+    // -------------------------
+    function restoreCacheIfAny(recordId) {
+        if (!recordId) return;
+        const k = storageKeyFor(recordId);
+        const val = sessionStorage.getItem(k);
+        if (val) {
+            window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = val;
+            console.log("[Control Plazos] Cache restaurado:", recordId, "| Fecha:", val);
         }
     }
 
     function parseEsDateToTime(s) {
-        // Acepta dd/mm/yyyy o d/m/yyyy
-        const txt = clean(s);
-        const m = txt.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        // Acepta d/m/yyyy o dd/mm/yyyy
+        const m = clean(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
         if (!m) return null;
-        const dd = parseInt(m[1], 10);
-        const mm = parseInt(m[2], 10);
-        const yy = parseInt(m[3], 10);
-        if (!dd || !mm || !yy) return null;
-
-        const d = new Date(yy, mm - 1, dd);
-        if (isNaN(d.getTime())) return null;
-
-        // Validacion basica (evita 32/13/2025)
-        if (d.getFullYear() !== yy || (d.getMonth() + 1) !== mm || d.getDate() !== dd) return null;
-
-        return d.getTime();
+        const d = parseInt(m[1], 10);
+        const mo = parseInt(m[2], 10);
+        const y = parseInt(m[3], 10);
+        if (!y || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+        const dt = new Date(y, mo - 1, d);
+        return isNaN(dt.getTime()) ? null : dt.getTime();
     }
 
     function formatTimeToEsDate(t) {
-        const d = new Date(t);
-        const dd = String(d.getDate()).padStart(2, "0");
-        const mm = String(d.getMonth() + 1).padStart(2, "0");
-        const yy = String(d.getFullYear());
+        const dt = new Date(t);
+        const dd = String(dt.getDate()).padStart(2, "0");
+        const mm = String(dt.getMonth() + 1).padStart(2, "0");
+        const yy = dt.getFullYear();
         return `${dd}/${mm}/${yy}`;
     }
 
-    function findMostRelevantPrereqTable(root) {
-        // 1) Si estas en related/Prerequisites__r/view, suele haber un datatable principal.
-        // 2) Si estas en /view, hay related list en la pagina.
-        // Buscamos tablas visibles con cabeceras (th) y elegimos la que tenga "Fecha real fin".
-        const candidates = deepQueryAll(root, 'table');
-        const visibleTables = candidates.filter(t => isVisible(t) && t.querySelector("thead") && t.querySelector("tbody"));
-        if (!visibleTables.length) return null;
+    function getAllRelatedTables(root) {
+        // Buscamos tablas o datatables que parezcan la related list (en /view o /related/view)
+        // En Salesforce puede variar mucho, asi que lo hacemos robusto:
+        const tables = [];
 
-        let best = null;
-        let bestScore = -1;
+        // HTML tables
+        for (const t of deepQueryAll(root, "table")) {
+            if (!isVisible(t)) continue;
+            tables.push({ type: "table", el: t });
+        }
 
-        for (const t of visibleTables) {
-            const ths = Array.from(t.querySelectorAll("thead th"));
-            if (!ths.length) continue;
+        // lightning-datatable / wrappers (no siempre hay <table> directo)
+        for (const dt of deepQueryAll(root, "lightning-datatable")) {
+            if (!isVisible(dt)) continue;
+            tables.push({ type: "datatable", el: dt });
+        }
 
-            const headers = ths.map(th => clean(th.innerText || th.textContent || ""));
-            const hasTarget = headers.some(h => h.toLowerCase() === HEADER_TARGET.toLowerCase());
-            if (!hasTarget) continue;
+        return tables;
+    }
 
-            // Score: + si parece related list por texto cercano
-            let score = 10;
+    function getHeaderIndexFromHtmlTable(tableEl, headerLabel) {
+        const ths = Array.from(tableEl.querySelectorAll("thead th"));
+        if (!ths.length) return null;
 
-            const containerText = clean((t.closest("article, section, div")?.innerText || "").slice(0, 600));
-            if (containerText.toLowerCase().includes(RELATED_LABEL_FALLBACK.toLowerCase())) score += 3;
+        for (let i = 0; i < ths.length; i++) {
+            const txt = clean(ths[i].innerText || ths[i].textContent);
+            if (txt.toLowerCase() === headerLabel.toLowerCase()) return i;
+        }
+        return null;
+    }
 
-            // + si la tabla tiene bastantes filas
-            const rows = t.querySelectorAll("tbody tr").length;
-            score += Math.min(rows, 30) / 10;
+    function extractDatesFromHtmlTable(tableEl, colIndex) {
+        const outTimes = [];
 
-            if (score > bestScore) {
-                bestScore = score;
-                best = t;
+        const rows = Array.from(tableEl.querySelectorAll("tbody tr"));
+        for (const tr of rows) {
+            if (!isVisible(tr)) continue;
+            const tds = Array.from(tr.querySelectorAll("td"));
+            if (tds.length <= colIndex) continue;
+
+            const cell = tds[colIndex];
+            const txt = clean(cell.innerText || cell.textContent);
+            if (!txt) continue;
+
+            const tt = parseEsDateToTime(txt);
+            if (tt != null) outTimes.push(tt);
+        }
+        return outTimes;
+    }
+
+    function extractFromDatatableLike(dtEl, headerLabel) {
+        // Intento 1: buscar dentro del shadow/light DOM algun table (muchas veces existe)
+        const innerTable = dtEl.querySelector("table");
+        if (innerTable) {
+            const idx = getHeaderIndexFromHtmlTable(innerTable, headerLabel);
+            if (idx != null) return extractDatesFromHtmlTable(innerTable, idx);
+        }
+
+        // Intento 2: buscar tablas cercanas (padres) por si el datatable es wrapper
+        const wrapper = dtEl.closest("article, section, div") || dtEl.parentElement;
+        if (wrapper) {
+            const maybeTable = wrapper.querySelector("table");
+            if (maybeTable) {
+                const idx = getHeaderIndexFromHtmlTable(maybeTable, headerLabel);
+                if (idx != null) return extractDatesFromHtmlTable(maybeTable, idx);
             }
         }
 
-        return best;
-    }
-
-    function getHeaderIndex(table, headerText) {
-        const ths = Array.from(table.querySelectorAll("thead th"));
-        const target = headerText.toLowerCase();
-
-        for (let i = 0; i < ths.length; i++) {
-            const h = clean(ths[i].innerText || ths[i].textContent || "").toLowerCase();
-            if (h === target) return i;
-        }
-        return -1;
+        return [];
     }
 
     function readUltimaFechaRealFin(root) {
-        const table = findMostRelevantPrereqTable(root);
-        if (!table) return null;
+        const candidates = getAllRelatedTables(root);
 
-        const idx = getHeaderIndex(table, HEADER_TARGET);
-        if (idx < 0) return null;
+        let bestTimes = [];
+        for (const c of candidates) {
+            let times = [];
+            if (c.type === "table") {
+                const idx = getHeaderIndexFromHtmlTable(c.el, LABEL_COL);
+                if (idx != null) times = extractDatesFromHtmlTable(c.el, idx);
+            } else if (c.type === "datatable") {
+                times = extractFromDatatableLike(c.el, LABEL_COL);
+            }
 
-        const rows = Array.from(table.querySelectorAll("tbody tr"));
-        if (!rows.length) return null;
-
-        let bestTime = null;
-
-        for (const tr of rows) {
-            if (!isVisible(tr)) continue;
-
-            // En lightning-datatable normalmente hay celdas td en orden
-            const tds = Array.from(tr.querySelectorAll("td"));
-            if (tds.length <= idx) continue;
-
-            const cell = tds[idx];
-            const txt = clean(cell.innerText || cell.textContent || "");
-            if (!txt) continue;
-
-            const t = parseEsDateToTime(txt);
-            if (t == null) continue;
-
-            if (bestTime == null || t > bestTime) bestTime = t;
+            if (times.length > bestTimes.length) bestTimes = times;
         }
 
-        return bestTime != null ? formatTimeToEsDate(bestTime) : null;
+        if (!bestTimes.length) return null;
+
+        const maxTime = Math.max(...bestTimes);
+        return formatTimeToEsDate(maxTime);
     }
 
     let scanToken = 0;
 
     function scanForCurrent(reason) {
-        if (!isConstructiveProjectPageByUrl()) return;
+        const recordId = getContextRecordId();
+        if (!recordId || !isConstructiveUrl()) return;
 
         const token = ++scanToken;
-        const keyForLog = getContextKey() || `${OBJECT_API}:?`;
-        const storageKey = getStorageKey();
-
         let attempts = 0;
         const maxAttempts = 14;
         const delayMs = 700;
+
+        // restaura cache si existe (solo 1 vez por scan inicial de ese registro)
+        restoreCacheIfAny(recordId);
 
         function attempt() {
             if (token !== scanToken) return;
 
             attempts++;
-            const valor = readUltimaFechaRealFin(getActiveRoot());
 
+            const valor = readUltimaFechaRealFin(getActiveRoot());
             if (valor) {
                 window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN = valor;
-                if (storageKey) sessionStorage.setItem(storageKey, valor);
+                sessionStorage.setItem(storageKeyFor(recordId), valor);
 
-                console.log("[Control Plazos] Key:", keyForLog, "| Ultima Fecha real fin:", valor, "| origen:", reason, "| intentos:", attempts);
+                console.log("[Control Plazos] Key:", `${OBJECT_API}:${recordId}`, "| Fecha:", valor, "| origen:", reason);
                 return;
             }
 
@@ -271,32 +278,34 @@
         attempt();
     }
 
-    let lastCtx = null;
+    let lastRecordId = null;
+    let lastHref = null;
 
     setInterval(() => {
-        const ctx = getContextKey();
-        if (ctx && ctx !== lastCtx) {
-            lastCtx = ctx;
-            restoreCacheIfAny();
+        const rid = getContextRecordId();
+        const href = location.href;
+
+        // Cambio de registro o de URL (incluye pasar de /view a /related/Prerequisites__r/view)
+        if ((rid && rid !== lastRecordId) || (href && href !== lastHref)) {
+            lastRecordId = rid;
+            lastHref = href;
             scanForCurrent("cambio contexto");
         }
     }, 800);
 
     setTimeout(() => {
-        lastCtx = getContextKey();
-        restoreCacheIfAny();
+        lastRecordId = getContextRecordId();
+        lastHref = location.href;
         scanForCurrent("inicio");
     }, 2000);
 
-    // Debug cache: si quieres que NO se agrupe en consola, metemos contador
-    let debugCounter = 0;
     if (DEBUG_CACHE_EVERY_MS > 0) {
+        let dbgCounter = 0;
         setInterval(() => {
-            debugCounter++;
-            console.log(
-                "[Control Plazos][CACHE][" + debugCounter + "]",
-                window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN || null
-            );
+            // OJO: Chrome puede agrupar logs identicos y mostrar un numerito (2,3,4...)
+            // Para evitarlo, añadimos contador:
+            dbgCounter++;
+            console.log("[Control Plazos][CACHE]", dbgCounter, window.CONTROL_PLAZOS_ULTIMA_FECHA_REAL_FIN);
         }, DEBUG_CACHE_EVERY_MS);
     }
 
