@@ -10,7 +10,6 @@
 // ==/UserScript==
 
 (function () {
-    const ONLY_OBJECT_API = "Constructive_project__c";
     const HEADER_ANCLA = "Nombre del Pre-requisito";
     const HEADER_OBJETIVO = "Fecha real fin";
 
@@ -207,12 +206,6 @@
         const urlKey = getUrlKey();
         const domKey = getActiveDomKey();
         const keyForLog = domKey || urlKey || "Constructive_project__c:?";
-
-        // Si no parece pagina de Constructive_project__c, no hacer nada
-        if (!/\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/view/i.test(location.href) && !domKey) {
-            return;
-        }
-
         const token = ++scanToken;
         let attempts = 0;
 
