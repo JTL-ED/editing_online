@@ -1,82 +1,108 @@
 // ==UserScript==
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
-// @version      1.0.0
-// @description  En Constructive_project__c: detecta cambios por URL y pestaña activa (Console) y guarda la ULTIMA "Fecha real fin" de la related list "Pre-requisitos". Cache persistente (sessionStorage) por registro.
+// @version      0.1.0
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
 
-//nota:  por URL (Constructive_project__c + tabs)
+(function () {
+  const LABEL = "Fecha real fin";
+  const CACHE_KEY = "plazos:lastFechaRealFin"; // puedes añadir el id del expediente si quieres
+  const LOG_EVERY_MS = 3000;
 
-// Lee la ultima Fecha real fin (max) en la tabla de Pre-requisitos y la guarda en cache.
-// Requiere: tu sistema de cache ST / localStorage (ajusta setCache/getCache segun tu script).
+  function log(...args) {
+    console.log("[Plazos][FechaRealFin]", ...args);
+  }
 
-function parseDateES(ddmmyyyy) {
-  // acepta "18/09/2024" o "3/10/2025"
-  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec((ddmmyyyy || "").trim());
-  if (!m) return null;
-  const d = parseInt(m[1], 10);
-  const mo = parseInt(m[2], 10) - 1;
-  const y = parseInt(m[3], 10);
-  const dt = new Date(y, mo, d);
-  if (isNaN(dt.getTime())) return null;
-  return dt;
-}
+  function norm(s) {
+    return (s || "")
+      .replace(/\s+/g, " ")
+      .trim()
+      .toLowerCase();
+  }
 
-function formatDateES(dateObj) {
-  const dd = String(dateObj.getDate()).padStart(2, "0");
-  const mm = String(dateObj.getMonth() + 1).padStart(2, "0");
-  const yy = dateObj.getFullYear();
-  return `${dd}/${mm}/${yy}`;
-}
+  function findColumnIndexByHeader(table, headerText) {
+    const ths = table.querySelectorAll("thead th");
+    if (!ths.length) return -1;
 
-function getCacheKeyForRealEndDate() {
-  // Si tu script ya tiene un "expedienteId" o algo similar, usa eso.
-  // Aqui hago una clave por URL base (sin query) para que funcione en console tabs.
-  const url = location.href.split("?")[0].split("#")[0];
-  return `plazos:lastRealEndDate:${url}`;
-}
+    const target = norm(headerText);
+    for (let i = 0; i < ths.length; i++) {
+      const th = ths[i];
+      const text = norm(th.innerText || th.textContent);
+      if (text.includes(target)) return i;
+    }
+    return -1;
+  }
 
-function setCacheValue(key, value) {
-  // Ajusta esto a tu cache real (ST.* o localStorage).
-  // Yo uso localStorage por defecto.
-  try { localStorage.setItem(key, value); } catch (e) {}
-}
+  function getLastNonEmptyCellInColumn(table, colIndex) {
+    const rows = table.querySelectorAll("tbody tr");
+    if (!rows.length) return null;
 
-function getLastRealEndDateFromPrereqTable() {
-  // Columna de "Fecha real fin" en tu HTML
-  const cells = document.querySelectorAll('td[data-col-key-value^="Real_end_date__c-"], td[data-col-key-value*="Real_end_date__c"]');
-  if (!cells || cells.length === 0) return null;
+    // recorremos desde abajo hacia arriba para encontrar el ultimo no vacio
+    for (let r = rows.length - 1; r >= 0; r--) {
+      const cells = rows[r].querySelectorAll("td");
+      if (!cells.length) continue;
+      const cell = cells[colIndex];
+      if (!cell) continue;
 
-  let maxDt = null;
+      const val = (cell.innerText || cell.textContent || "").trim();
+      if (val) return val;
+    }
+    return null;
+  }
 
-  cells.forEach(td => {
-    const el = td.querySelector("lightning-formatted-date-time");
-    const txt = (el ? el.textContent : td.textContent || "").trim();
-    if (!txt) return; // vacio = sin fecha real fin
-    const dt = parseDateES(txt);
-    if (!dt) return;
-    if (!maxDt || dt.getTime() > maxDt.getTime()) maxDt = dt;
-  });
+  function scanAndCache() {
+    // Nota: lightning puede tener varias tablas. Tomamos la primera que tenga thead+tbody.
+    const tables = Array.from(document.querySelectorAll("table"))
+      .filter(t => t.querySelector("thead") && t.querySelector("tbody"));
 
-  return maxDt;
-}
+    if (!tables.length) {
+      log("No hay tablas aún (table thead/tbody).");
+      return;
+    }
 
-function updateCacheLastRealEndDate() {
-  const dt = getLastRealEndDateFromPrereqTable();
-  if (!dt) return false;
+    let updated = false;
 
-  const key = getCacheKeyForRealEndDate();
-  const val = formatDateES(dt);
-  setCacheValue(key, val);
+    for (const table of tables) {
+      const col = findColumnIndexByHeader(table, LABEL);
+      if (col === -1) continue;
 
-  console.log(`[Plazos] Cache guardada: ${key} = ${val}`);
-  return true;
-}
+      const lastValue = getLastNonEmptyCellInColumn(table, col);
+      if (!lastValue) {
+        log("Encontrada columna pero sin valores no vacios.");
+        continue;
+      }
 
-// Llamalo cuando detectes que estas en la related list de Pre-requisitos,
-// o despues de que tu observer detecte cambios de tabla.
-updateCacheLastRealEndDate();
+      const prev = localStorage.getItem(CACHE_KEY);
+      if (prev !== lastValue) {
+        localStorage.setItem(CACHE_KEY, lastValue);
+        log("CACHE actualizado:", lastValue, "(antes:", prev, ")");
+      } else {
+        log("CACHE sin cambios:", lastValue);
+      }
+
+      updated = true;
+      break; // ya lo hemos encontrado en una tabla valida
+    }
+
+    if (!updated) {
+      log(`No se encontro ninguna tabla con header que contenga "${LABEL}".`);
+    }
+  }
+
+  // 1) Log de arranque para confirmar que el script SI carga
+  log("Script cargado. URL:", location.href);
+
+  // 2) Observa cambios del DOM
+  const mo = new MutationObserver(() => scanAndCache());
+  mo.observe(document.body, { childList: true, subtree: true });
+
+  // 3) Y ademas, por seguridad, escanea cada X segundos (Lightning a veces “esconde” cambios)
+  setInterval(scanAndCache, LOG_EVERY_MS);
+
+  // 4) primer escaneo
+  scanAndCache();
+})();
