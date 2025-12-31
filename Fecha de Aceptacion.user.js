@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Fecha de Aceptacion
 // @namespace    sf-control-plazos
-// @version      1.3.2
+// @version      1.3.1
 // @description  Lee "Fecha de Aceptación" SOLO en Record__c. Detecta cambios por URL y por pestaña activa (Console). Cache unico persistente (sessionStorage).
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
-//nota: Record__c only + tabs + persiste cache 
+
 (function () {
     const LABEL = "Fecha de Aceptación";
     const ONLY_OBJECT_API = "Record__c";
@@ -28,8 +28,8 @@
     }
 
     const clean = s => s?.replace(/\u00A0/g, " ")
-                         .replace(/[ \t\r\n]+/g, " ")
-                         .trim() || "";
+    .replace(/[ \t\r\n]+/g, " ")
+    .trim() || "";
 
     function isVisible(el) {
         if (!el || el.nodeType !== 1) return false;
@@ -92,8 +92,8 @@
         const layout = root.querySelector('records-record-layout');
         if (layout) {
             const rid = layout.getAttribute('record-id') ||
-                        layout.getAttribute('data-recordid') ||
-                        layout.getAttribute('data-record-id');
+                  layout.getAttribute('data-recordid') ||
+                  layout.getAttribute('data-record-id');
             if (rid) return rid;
         }
 
@@ -102,8 +102,8 @@
             const el = root.querySelector(sel);
             if (el) {
                 const rid = el.getAttribute('record-id') ||
-                            el.getAttribute('data-recordid') ||
-                            el.getAttribute('data-record-id');
+                      el.getAttribute('data-recordid') ||
+                      el.getAttribute('data-record-id');
                 if (rid) return rid;
             }
         }
@@ -167,11 +167,20 @@
             const valor = readFechaAceptacion(getActiveRoot());
 
             if (valor) {
+                const prev = window.CONTROL_PLAZOS_FECHA_ACEPTACION;
+
+                // Actualiza cache (aunque sea el mismo valor)
                 window.CONTROL_PLAZOS_FECHA_ACEPTACION = valor;
                 sessionStorage.setItem(STORAGE_KEY, valor);
-                console.log("[Control Plazos] Key:", keyForLog, "| Fecha:", valor, "| origen:", reason);
+
+                // Solo log si ha cambiado el valor respecto al que ya habia
+                if (valor !== prev) {
+                    console.log("[Control Plazos] Key:", keyForLog, "| Fecha:", valor, "| origen:", reason);
+                }
+
                 return;
             }
+
 
             if (attempts < maxAttempts) setTimeout(attempt, delayMs);
         }
