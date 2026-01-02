@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
-// @version      1.2.3
-// @description  Lee la lista relacionada "Pre-requisitos" y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en contenido visible (incluye modal flotante). Cache por pestaña (sessionStorage) y por recordId. Borra cache si no hay tabla o fecha.
+// @version      1.2.4
+// @description  Detecta la tabla relacionada (Nombre del Pre-requisito) y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en la zona visible. Guarda en sessionStorage y borra cache si no hay fecha.
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
 // @run-at       document-idle
@@ -10,318 +10,353 @@
 // ==/UserScript==
 
 (function () {
-  const ONLY_OBJECT_API = "Constructive_project__c";
-  const HEADER_ANCLA = "Nombre del Pre-requisito";
-  const HEADER_OBJETIVO = "Fecha real fin";
+    const ONLY_OBJECT_API = "Constructive_project__c";
+    const HEADER_ANCLA = "Nombre del Pre-requisito";
+    const HEADER_OBJETIVO = "Fecha real fin";
 
-  // Cache por pestaña + por recordId
-  const STORAGE_KEY_PREFIX = "CONTROL_PLAZOS_FECHA_REAL_FIN:";
+    const STORAGE_KEY = "CONTROL_PLAZOS_FECHA_REAL_FIN";
+    const DEBUG_CACHE_EVERY_MS = 5000;
 
-  // Debug
-  const DEBUG_CACHE_EVERY_MS = 5000;
+    const CONTEXT_POLL_MS = 800;
+    const SCAN_MAX_ATTEMPTS = 14;
+    const SCAN_DELAY_MS = 700;
 
-  // Poll de contexto (tabs internas de Salesforce / cambios de vista)
-  const CONTEXT_POLL_MS = 800;
+    // Re-scan por cambios de DOM (ordenacion, refresh, re-render)
+    const MUTATION_DEBOUNCE_MS = 450;
 
-  // Reintentos de carga (tabla tarda en pintar)
-  const SCAN_MAX_ATTEMPTS = 14;
-  const SCAN_DELAY_MS = 700;
-
-  // Solo en estas 2 rutas
-  function isAllowedUrl() {
-    const p = location.pathname;
-    return (
-      /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/view$/.test(p) ||
-      /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/related\/Prerequisites__r\/view$/.test(p)
-    );
-  }
-
-  function clean(s) {
-    return (s || "")
-      .replace(/\u00A0/g, " ")
-      .replace(/[ \t\r\n]+/g, " ")
-      .trim();
-  }
-
-  function isVisible(el) {
-    if (!el || el.nodeType !== 1) return false;
-    if (el.closest('[aria-hidden="true"]')) return false;
-    const r = el.getClientRects();
-    return r && r.length > 0;
-  }
-
-  function getElementsByXPath(xpath, parent) {
-    const ctx = parent || document;
-    const out = [];
-    const it = document.evaluate(xpath, ctx, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
-    let node;
-    while ((node = it.iterateNext())) out.push(node);
-    return out;
-  }
-
-  function parseDDMMYYYY(s) {
-    const m = clean(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (!m) return null;
-    const d = new Date(+m[3], +m[2] - 1, +m[1]);
-    return isNaN(d.getTime()) ? null : d;
-  }
-
-  function formatDDMMYYYY(date) {
-    const dd = String(date.getDate()).padStart(2, "0");
-    const mm = String(date.getMonth() + 1).padStart(2, "0");
-    const yyyy = date.getFullYear();
-    return `${dd}/${mm}/${yyyy}`;
-  }
-
-  function getRecordIdFromUrl() {
-    const m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\//i);
-    return m ? m[1] : null;
-  }
-
-  function getVisibleTabPanel() {
-    return (
-      document.querySelector('.slds-tabs_default__content[aria-hidden="false"]') ||
-      document.querySelector('.slds-tabs_scoped__content[aria-hidden="false"]') ||
-      document.querySelector('[role="tabpanel"][aria-hidden="false"]') ||
-      null
-    );
-  }
-
-  // Si hay modal flotante visible, se prioriza (tu captura muestra este caso)
-  function getVisibleModalContainer() {
-    const modals = Array.from(document.querySelectorAll(".slds-modal, .uiModal, [role='dialog']"));
-    for (const m of modals) {
-      if (!isVisible(m)) continue;
-      // Contenedor tipico dentro del modal
-      const container =
-        m.querySelector(".slds-modal__container") ||
-        m.querySelector(".modal-container") ||
-        m;
-      if (container && isVisible(container)) return container;
-    }
-    return null;
-  }
-
-  // Devuelve roots candidatos en orden de prioridad: modal visible -> tabpanel visible -> document
-  function getScanRoots() {
-    const roots = [];
-    const modal = getVisibleModalContainer();
-    if (modal) roots.push(modal);
-    const tab = getVisibleTabPanel();
-    if (tab) roots.push(tab);
-    roots.push(document);
-    return roots;
-  }
-
-  function findTableInRoot(root) {
-    const thTitle = getElementsByXPath(`.//span[@title='${HEADER_ANCLA}']`, root);
-
-    for (const th of thTitle) {
-      if (!isVisible(th)) continue;
-
-      const table = th.closest("table");
-      if (!table || !isVisible(table)) continue;
-
-      const frf = getElementsByXPath(`.//span[@title='${HEADER_OBJETIVO}']`, table)[0];
-      if (frf) return table;
-    }
-    return null;
-  }
-
-  function readUltimaFechaRealFinFromRoot(root) {
-    const table = findTableInRoot(root);
-    if (!table) return { foundTable: false, dateStr: null, table: null };
-
-    const frfSpan = getElementsByXPath(`.//span[@title='${HEADER_OBJETIVO}']`, table)[0];
-    if (!frfSpan) return { foundTable: true, dateStr: null, table };
-
-    const th = frfSpan.closest("th");
-    if (!th) return { foundTable: true, dateStr: null, table };
-
-    const colIndex = th.cellIndex;
-    if (typeof colIndex !== "number") return { foundTable: true, dateStr: null, table };
-
-    let maxDate = null;
-
-    const rows = table.querySelectorAll("tbody tr");
-    for (const tr of rows) {
-      const td = tr.children && tr.children[colIndex];
-      if (!td) continue;
-      const d = parseDDMMYYYY(td.innerText);
-      if (d && (!maxDate || d > maxDate)) maxDate = d;
+    function isAllowedUrl() {
+        const p = location.pathname;
+        return (
+            /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/view$/.test(p) ||
+            /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/related\/Prerequisites__r\/view$/.test(p)
+        );
     }
 
-    if (!maxDate) return { foundTable: true, dateStr: null, table };
-    return { foundTable: true, dateStr: formatDDMMYYYY(maxDate), table };
-  }
-
-  function getStorageKey(recordId) {
-    return STORAGE_KEY_PREFIX + recordId;
-  }
-
-  function setCacheForRecord(recordId, valueOrNull) {
-    const k = getStorageKey(recordId);
-
-    if (valueOrNull) {
-      sessionStorage.setItem(k, valueOrNull);
-      window.CONTROL_PLAZOS_FECHA_REAL_FIN = valueOrNull;
+    // -------------------------
+    // RESTAURAR CACHE tras F5
+    // -------------------------
+    if (sessionStorage.getItem(STORAGE_KEY)) {
+        window.CONTROL_PLAZOS_FECHA_REAL_FIN = sessionStorage.getItem(STORAGE_KEY);
+        console.log("[Control Plazos] Cache restaurado desde sessionStorage:", window.CONTROL_PLAZOS_FECHA_REAL_FIN);
     } else {
-      sessionStorage.removeItem(k);
-      window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
-    }
-  }
-
-  function restoreCacheForRecord(recordId) {
-    const k = getStorageKey(recordId);
-    const v = sessionStorage.getItem(k);
-    window.CONTROL_PLAZOS_FECHA_REAL_FIN = v || null;
-    if (v) {
-      console.log("[Control Plazos] Cache restaurado desde sessionStorage:", v);
-    }
-  }
-
-  // Evita que 2 escaneos en paralelo se pisen
-  let scanToken = 0;
-
-  // Observer de cambios de tabla (reordenar, paginar, refrescar lista, etc.)
-  let tableObserver = null;
-  let observedTable = null;
-
-  function attachTableObserver(table, recordId, keyForLog) {
-    if (!table) return;
-
-    if (observedTable === table) return;
-
-    // Desconectar observer anterior
-    if (tableObserver) {
-      try { tableObserver.disconnect(); } catch {}
-      tableObserver = null;
-      observedTable = null;
+        window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
     }
 
-    observedTable = table;
+    const clean = (s) =>
+        (s || "")
+            .replace(/\u00A0/g, " ")
+            .replace(/[ \t\r\n]+/g, " ")
+            .trim();
 
-    tableObserver = new MutationObserver(() => {
-      // Si cambia la tabla (sort, refresh), reescanea
-      scanForCurrent("tabla cambio");
-    });
+    function isVisible(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.closest('[aria-hidden="true"]')) return false;
+        const r = el.getClientRects();
+        return r && r.length > 0;
+    }
 
-    // Observa tbody (cambios de filas)
-    const tbody = table.querySelector("tbody") || table;
-    try {
-      tableObserver.observe(tbody, { childList: true, subtree: true });
-      // Log opcional, si no lo quieres lo quitas
-      // console.log("[Fecha real fin] Key:", keyForLog, "| Observer activo");
-    } catch {}
-  }
+    function getElementsByXPath(xpath, parent) {
+        const ctx = parent || document;
+        const out = [];
+        const it = document.evaluate(xpath, ctx, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE, null);
+        let node;
+        while ((node = it.iterateNext())) out.push(node);
+        return out;
+    }
 
-  function scanForCurrent(reason) {
-    if (!isAllowedUrl()) return;
+    function parseDDMMYYYY(s) {
+        const m = clean(s).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+        if (!m) return null;
+        const d = new Date(+m[3], +m[2] - 1, +m[1]);
+        return isNaN(d.getTime()) ? null : d;
+    }
 
-    // Si la pestaña de Chrome no esta visible, Salesforce a veces deja el DOM raro; lo evitamos
-    if (document.visibilityState !== "visible") return;
+    function formatDDMMYYYY(date) {
+        const dd = String(date.getDate()).padStart(2, "0");
+        const mm = String(date.getMonth() + 1).padStart(2, "0");
+        const yyyy = date.getFullYear();
+        return `${dd}/${mm}/${yyyy}`;
+    }
 
-    const recordId = getRecordIdFromUrl();
-    const keyForLog = recordId ? `${ONLY_OBJECT_API}:${recordId}` : `${ONLY_OBJECT_API}:?`;
+    function getVisibleTabPanel() {
+        return (
+            document.querySelector('.slds-tabs_default__content[aria-hidden="false"]') ||
+            document.querySelector('.slds-tabs_scoped__content[aria-hidden="false"]') ||
+            document.querySelector('[role="tabpanel"][aria-hidden="false"]') ||
+            null
+        );
+    }
 
-    if (!recordId) return;
-
-    const token = ++scanToken;
-    let attempts = 0;
-
-    function attempt() {
-      if (token !== scanToken) return;
-      attempts++;
-
-      // Buscar en roots visibles (modal, tabpanel, document) y quedarnos con el primero util
-      let best = { foundTable: false, dateStr: null, table: null };
-
-      const roots = getScanRoots();
-      for (const r of roots) {
-        const res = readUltimaFechaRealFinFromRoot(r);
-        if (res.foundTable) {
-          best = res;
-          break;
+    // Importante: cuando la related list se abre "flotante", suele vivir en un dialog/modal visible.
+    function getVisibleDialogRoot() {
+        // Preferimos dialogs visibles que contengan datatable/lista
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"]')).filter(isVisible);
+        for (const d of dialogs) {
+            // Si dentro hay lightning-datatable o un table, es candidato
+            if (d.querySelector("lightning-datatable, table")) return d;
         }
-      }
-
-      if (best.foundTable && best.dateStr) {
-        setCacheForRecord(recordId, best.dateStr);
-        console.log("[Fecha real fin] Key:", keyForLog, "| Ultima:", best.dateStr, "| origen:", reason);
-        attachTableObserver(best.table, recordId, keyForLog);
-        return;
-      }
-
-      if (best.foundTable && !best.dateStr) {
-        setCacheForRecord(recordId, null);
-        console.log("[Fecha real fin] Key:", keyForLog, "| No hay fecha | origen:", reason);
-        attachTableObserver(best.table, recordId, keyForLog);
-        return;
-      }
-
-      if (attempts < SCAN_MAX_ATTEMPTS) {
-        setTimeout(attempt, SCAN_DELAY_MS);
-      } else {
-        setCacheForRecord(recordId, null);
-        console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason);
-      }
+        // Algunos overlays no usan role="dialog"
+        const modals = Array.from(document.querySelectorAll(".uiModal, .modal-container, .slds-modal")).filter(isVisible);
+        for (const m of modals) {
+            if (m.querySelector("lightning-datatable, table")) return m;
+        }
+        return null;
     }
 
-    attempt();
-  }
+    function getActiveRoot() {
+        const dialog = getVisibleDialogRoot();
+        if (dialog) return dialog;
 
-  // Estado de contexto (para detectar cambios internos de Salesforce sin recargar)
-  let lastPath = null;
-  let lastRecordId = null;
+        const tabPanel = getVisibleTabPanel();
+        if (tabPanel) return tabPanel;
 
-  function contextTick() {
-    if (!isAllowedUrl()) return;
-    if (document.visibilityState !== "visible") return;
-
-    const p = location.pathname;
-    const rid = getRecordIdFromUrl();
-
-    const changed = (p !== lastPath) || (rid !== lastRecordId);
-
-    if (changed) {
-      lastPath = p;
-      lastRecordId = rid;
-
-      if (rid) restoreCacheForRecord(rid);
-      scanForCurrent("cambio contexto");
+        return document;
     }
-  }
 
-  // Tick de contexto
-  setInterval(contextTick, CONTEXT_POLL_MS);
-
-  // Arranque
-  setTimeout(() => {
-    if (!isAllowedUrl()) return;
-    const rid = getRecordIdFromUrl();
-    if (rid) restoreCacheForRecord(rid);
-    lastPath = location.pathname;
-    lastRecordId = rid;
-    scanForCurrent("inicio");
-  }, 1200);
-
-  // Cuando vuelves a esta pestaña de Chrome, reescanea
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") {
-      scanForCurrent("tab chrome visible");
+    function getConstructiveIdFromUrl() {
+        const m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\/view/i);
+        return m ? m[1] : null;
     }
-  });
 
-  // Debug: imprime el cache actual
-  if (DEBUG_CACHE_EVERY_MS > 0) {
+    function getActiveRecordIdFromDom() {
+        const root = getActiveRoot();
+
+        const layout = root.querySelector("records-record-layout");
+        if (layout) {
+            const rid =
+                layout.getAttribute("record-id") ||
+                layout.getAttribute("data-recordid") ||
+                layout.getAttribute("data-record-id");
+            if (rid) return rid;
+        }
+
+        const attrs = ["[record-id]", "[data-recordid]", "[data-record-id]"];
+        for (const sel of attrs) {
+            const el = root.querySelector(sel);
+            if (el) {
+                const rid =
+                    el.getAttribute("record-id") ||
+                    el.getAttribute("data-recordid") ||
+                    el.getAttribute("data-record-id");
+                if (rid) return rid;
+            }
+        }
+
+        const a = root.querySelector('a[href*="/lightning/r/Constructive_project__c/"]');
+        if (a) {
+            const mm = (a.getAttribute("href") || "").match(/\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\/view/i);
+            if (mm) return mm[1];
+        }
+
+        return null;
+    }
+
+    function getUrlKey() {
+        const rid = getConstructiveIdFromUrl();
+        return rid ? `${ONLY_OBJECT_API}:${rid}` : null;
+    }
+
+    function getActiveDomKey() {
+        const rid = getActiveRecordIdFromDom();
+        return rid ? `${ONLY_OBJECT_API}:${rid}` : null;
+    }
+
+    function findTableInRoot(root) {
+        const thTitle = getElementsByXPath(`.//span[@title='${HEADER_ANCLA}']`, root);
+
+        for (const th of thTitle) {
+            if (!isVisible(th)) continue;
+
+            const table = th.closest("table");
+            if (!table) continue;
+
+            const frf = getElementsByXPath(`.//span[@title='${HEADER_OBJETIVO}']`, table)[0];
+            if (frf) return table;
+        }
+        return null;
+    }
+
+    function readUltimaFechaRealFin(root) {
+        const table = findTableInRoot(root);
+        if (!table) return { foundTable: false, dateStr: null };
+
+        const frfSpan = getElementsByXPath(`.//span[@title='${HEADER_OBJETIVO}']`, table)[0];
+        if (!frfSpan) return { foundTable: true, dateStr: null };
+
+        const th = frfSpan.closest("th");
+        if (!th) return { foundTable: true, dateStr: null };
+
+        const colIndex = th.cellIndex;
+        if (typeof colIndex !== "number") return { foundTable: true, dateStr: null };
+
+        let maxDate = null;
+
+        const rows = table.querySelectorAll("tbody tr");
+        for (const tr of rows) {
+            const td = tr.children && tr.children[colIndex];
+            if (!td) continue;
+            const d = parseDDMMYYYY(td.innerText);
+            if (d && (!maxDate || d > maxDate)) maxDate = d;
+        }
+
+        if (!maxDate) return { foundTable: true, dateStr: null };
+        return { foundTable: true, dateStr: formatDDMMYYYY(maxDate) };
+    }
+
+    function setCache(valueOrNull) {
+        if (valueOrNull) {
+            window.CONTROL_PLAZOS_FECHA_REAL_FIN = valueOrNull;
+            sessionStorage.setItem(STORAGE_KEY, valueOrNull);
+        } else {
+            window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
+            sessionStorage.removeItem(STORAGE_KEY);
+        }
+    }
+
+    let scanToken = 0;
+
+    function scanForCurrent(reason) {
+        if (!isAllowedUrl()) return;
+
+        const urlKey = getUrlKey();
+        const domKey = getActiveDomKey();
+        const keyForLog = domKey || urlKey || "Constructive_project__c:?";
+
+        const token = ++scanToken;
+        let attempts = 0;
+
+        function attempt() {
+            if (token !== scanToken) return;
+            attempts++;
+
+            const root = getActiveRoot();
+            const res = readUltimaFechaRealFin(root);
+
+            if (res.foundTable && res.dateStr) {
+                setCache(res.dateStr);
+                console.log("[Fecha real fin] Key:", keyForLog, "| Ultima:", res.dateStr, "| origen:", reason);
+                return;
+            }
+
+            if (res.foundTable && !res.dateStr) {
+                setCache(null);
+                console.log("[Fecha real fin] Key:", keyForLog, "| No hay fecha | origen:", reason);
+                return;
+            }
+
+            if (attempts < SCAN_MAX_ATTEMPTS) {
+                setTimeout(attempt, SCAN_DELAY_MS);
+            } else {
+                setCache(null);
+                console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason);
+            }
+        }
+
+        attempt();
+    }
+
+    // -------------------------
+    // Detectar cambio de contexto (URL/DOM key)
+    // -------------------------
+    let lastUrlKey = null;
+    let lastDomKey = null;
+
     setInterval(() => {
-      const rid = getRecordIdFromUrl();
-      const key = rid ? getStorageKey(rid) : "(sin recordId)";
-      const val = rid ? sessionStorage.getItem(getStorageKey(rid)) : null;
+        if (!isAllowedUrl()) return;
 
-      console.log("[Control Plazos][CACHE] Key:", key, "| Fecha real fin:", val || null);
-    }, DEBUG_CACHE_EVERY_MS);
-  }
+        const u = getUrlKey();
+        const d = getActiveDomKey();
 
-  console.log("[Control Plazos] Script Fecha real fin cargado (persistente, cache por recordId)");
+        if ((u && u !== lastUrlKey) || (d && d !== lastDomKey)) {
+            lastUrlKey = u;
+            lastDomKey = d;
+            scanForCurrent("cambio contexto");
+        }
+    }, CONTEXT_POLL_MS);
+
+    setTimeout(() => {
+        lastUrlKey = getUrlKey();
+        lastDomKey = getActiveDomKey();
+        scanForCurrent("inicio");
+    }, 2000);
+
+    // -------------------------
+    // Re-scan por click (ordenaciones, refresh, etc.)
+    // -------------------------
+    let clickDebounce = null;
+    document.addEventListener(
+        "click",
+        (e) => {
+            if (!isAllowedUrl()) return;
+
+            // Solo si el click ocurre dentro de la zona visible (tabpanel o dialog)
+            const root = getActiveRoot();
+            if (!root || !root.contains(e.target)) return;
+
+            // Si se ha hecho click en la cabecera objetivo o dentro del datatable
+            const clickedHeader = e.target && e.target.closest && e.target.closest("th, [role='columnheader']");
+            const isTargetHeader = clickedHeader && clean(clickedHeader.innerText || "").includes(HEADER_OBJETIVO);
+            const inDataTable = e.target && e.target.closest && e.target.closest("lightning-datatable, table");
+
+            if (!isTargetHeader && !inDataTable) return;
+
+            clearTimeout(clickDebounce);
+            clickDebounce = setTimeout(() => {
+                scanForCurrent("click");
+            }, 250);
+        },
+        true
+    );
+
+    // -------------------------
+    // Re-scan por re-render (MutationObserver)
+    // -------------------------
+    let mo = null;
+    let lastObservedRoot = null;
+    let mutationDebounce = null;
+
+    function ensureObserver() {
+        if (!isAllowedUrl()) return;
+
+        const root = getActiveRoot();
+        if (!root || root === document) {
+            // Aun no hay root claro, se reintentara via el poll/context
+            return;
+        }
+        if (root === lastObservedRoot) return;
+
+        // Cambia el root observado (por ejemplo, aparece ventana flotante)
+        if (mo) {
+            try { mo.disconnect(); } catch {}
+        }
+
+        lastObservedRoot = root;
+
+        mo = new MutationObserver(() => {
+            clearTimeout(mutationDebounce);
+            mutationDebounce = setTimeout(() => {
+                scanForCurrent("mutation");
+            }, MUTATION_DEBOUNCE_MS);
+        });
+
+        try {
+            mo.observe(root, { childList: true, subtree: true, characterData: true });
+        } catch {}
+    }
+
+    setInterval(() => {
+        if (!isAllowedUrl()) return;
+        ensureObserver();
+    }, 900);
+
+    // -------------------------
+    // Debug: imprimir cache constantemente
+    // -------------------------
+    if (DEBUG_CACHE_EVERY_MS > 0) {
+        setInterval(() => {
+            console.log("[Control Plazos][CACHE] Fecha real fin:", window.CONTROL_PLAZOS_FECHA_REAL_FIN);
+        }, DEBUG_CACHE_EVERY_MS);
+    }
+
+    console.log("[Control Plazos] Script Fecha real fin cargado (persistente)");
 })();
