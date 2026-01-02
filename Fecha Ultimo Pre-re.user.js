@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
-// @version      1.2.0
-// @description  Detecta la tabla relacionada (Nombre del Pre-requisito) y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en la pestaña visible. Guarda en sessionStorage y borra cache si no hay fecha. Reescanea en cambios de tabla (sort), cambio de contexto y al volver a la pestaña.
+// @version      1.2.2
+// @description  Detecta la tabla relacionada (Nombre del Pre-requisito) y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en la pestaña visible. Guarda en sessionStorage y borra cache si no hay fecha.
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
 // @run-at       document-idle
@@ -15,13 +15,14 @@
     const HEADER_OBJETIVO = "Fecha real fin";
 
     const STORAGE_KEY = "CONTROL_PLAZOS_FECHA_REAL_FIN";
-    const DEBUG_CACHE_EVERY_MS = 0; // pon 5000 si quieres debug de cache
+    const DEBUG_CACHE_EVERY_MS = 5000;
 
     const CONTEXT_POLL_MS = 800;
     const SCAN_MAX_ATTEMPTS = 14;
     const SCAN_DELAY_MS = 700;
 
-    const MUTATION_DEBOUNCE_MS = 450;
+    // Re-escaneo por cambios internos (ordenar / paginar / refrescos)
+    const RESCAN_DEBOUNCE_MS = 500;
 
     function isAllowedUrl() {
         const p = location.pathname;
@@ -88,11 +89,12 @@
 
     function getActiveRoot() {
         const tabPanel = getVisibleTabPanel();
-        return tabPanel || document;
+        if (tabPanel) return tabPanel;
+        return document;
     }
 
     function getConstructiveIdFromUrl() {
-        const m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\/(view|related\/Prerequisites__r\/view)/i);
+        const m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\/view/i);
         return m ? m[1] : null;
     }
 
@@ -182,8 +184,6 @@
     }
 
     function setCache(valueOrNull) {
-        const prev = window.CONTROL_PLAZOS_FECHA_REAL_FIN || null;
-
         if (valueOrNull) {
             window.CONTROL_PLAZOS_FECHA_REAL_FIN = valueOrNull;
             sessionStorage.setItem(STORAGE_KEY, valueOrNull);
@@ -191,50 +191,29 @@
             window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
             sessionStorage.removeItem(STORAGE_KEY);
         }
+    }
 
-        return prev !== (valueOrNull || null);
+    // Evitar “DOM por detras”: si URL tiene ID, exigir que coincida con el DOM activo
+    function urlDomMatchOrUnknown() {
+        const urlId = getConstructiveIdFromUrl();
+        const domId = getActiveRecordIdFromDom();
+        if (!urlId) return true;
+        if (!domId) return true; // si no podemos leer domId, no bloqueamos
+        return urlId === domId;
     }
 
     let scanToken = 0;
-    let lastObservedTable = null;
-    let tableObserver = null;
-    let mutationDebounceTimer = null;
-
-    function disconnectObserver() {
-        if (tableObserver) {
-            try { tableObserver.disconnect(); } catch {}
-            tableObserver = null;
-        }
-        lastObservedTable = null;
-    }
-
-    function attachObserverToTable(tableEl) {
-        if (!tableEl) return;
-        if (lastObservedTable === tableEl) return;
-
-        disconnectObserver();
-        lastObservedTable = tableEl;
-
-        tableObserver = new MutationObserver(() => {
-            if (mutationDebounceTimer) clearTimeout(mutationDebounceTimer);
-            mutationDebounceTimer = setTimeout(() => {
-                scanForCurrent("mutacion tabla");
-            }, MUTATION_DEBOUNCE_MS);
-        });
-
-        try {
-            tableObserver.observe(tableEl, { childList: true, subtree: true, characterData: true });
-        } catch {
-            disconnectObserver();
-        }
-    }
+    let lastPrintedKey = null;
+    let lastPrintedDate = null;
 
     function scanForCurrent(reason) {
         if (!isAllowedUrl()) return;
+        if (!document.hasFocus()) return; // si la pestaña chrome no esta enfocada, no escanear
+        if (!urlDomMatchOrUnknown()) return; // evita leer “panel oculto” de otro registro
 
         const urlKey = getUrlKey();
         const domKey = getActiveDomKey();
-        const keyForLog = domKey || urlKey || `${ONLY_OBJECT_API}:?`;
+        const keyForLog = domKey || urlKey || "Constructive_project__c:?";
 
         const token = ++scanToken;
         let attempts = 0;
@@ -246,22 +225,26 @@
             const root = getActiveRoot();
             const res = readUltimaFechaRealFin(root);
 
-            // enganchar observer cuando ya tenemos la tabla
-            if (res.tableEl) attachObserverToTable(res.tableEl);
-            else disconnectObserver();
-
             if (res.foundTable && res.dateStr) {
-                const changed = setCache(res.dateStr);
-                if (changed) {
+                setCache(res.dateStr);
+
+                // Decide si imprimir o no: por defecto, NO repetimos si es igual
+                const sameAsLast = (keyForLog === lastPrintedKey && res.dateStr === lastPrintedDate);
+                if (!sameAsLast) {
                     console.log("[Fecha real fin] Key:", keyForLog, "| Ultima:", res.dateStr, "| origen:", reason);
+                    lastPrintedKey = keyForLog;
+                    lastPrintedDate = res.dateStr;
                 }
                 return;
             }
 
             if (res.foundTable && !res.dateStr) {
-                const changed = setCache(null);
-                if (changed) {
+                setCache(null);
+                const sameAsLast = (keyForLog === lastPrintedKey && lastPrintedDate === null);
+                if (!sameAsLast) {
                     console.log("[Fecha real fin] Key:", keyForLog, "| No hay fecha | origen:", reason);
+                    lastPrintedKey = keyForLog;
+                    lastPrintedDate = null;
                 }
                 return;
             }
@@ -269,24 +252,24 @@
             if (attempts < SCAN_MAX_ATTEMPTS) {
                 setTimeout(attempt, SCAN_DELAY_MS);
             } else {
-                const changed = setCache(null);
-                if (changed) {
-                    console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason);
-                }
-                disconnectObserver();
+                setCache(null);
+                console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason);
+                lastPrintedKey = keyForLog;
+                lastPrintedDate = null;
             }
         }
 
         attempt();
     }
 
+    // -------------------------
+    // DETECCION DE CAMBIO CONTEXTO (Console)
+    // -------------------------
     let lastUrlKey = null;
     let lastDomKey = null;
 
-    // 1) Cambio de contexto (subtab / record)
     setInterval(() => {
         if (!isAllowedUrl()) return;
-
         const u = getUrlKey();
         const d = getActiveDomKey();
 
@@ -297,26 +280,46 @@
         }
     }, CONTEXT_POLL_MS);
 
-    // 2) Inicio
+    // -------------------------
+    // REESCANEO POR EVENTOS (ordenar / click / focus)
+    // -------------------------
+    let rescanTimer = null;
+    function requestRescan(reason) {
+        if (rescanTimer) clearTimeout(rescanTimer);
+        rescanTimer = setTimeout(() => scanForCurrent(reason), RESCAN_DEBOUNCE_MS);
+    }
+
+    document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) requestRescan("visibilidad");
+    });
+
+    window.addEventListener("focus", () => requestRescan("focus"));
+
+    // Clicks (captura): ordenar columna suele ser click
+    document.addEventListener("click", () => requestRescan("click"), true);
+
+    // MutationObserver: si la tabla cambia por orden/paginacion/refresco
+    let mo = null;
+    function attachObserver() {
+        if (mo) return;
+        mo = new MutationObserver(() => requestRescan("mutacion"));
+        mo.observe(getActiveRoot(), { childList: true, subtree: true });
+    }
+
+    // Inicio
     setTimeout(() => {
+        attachObserver();
         lastUrlKey = getUrlKey();
         lastDomKey = getActiveDomKey();
         scanForCurrent("inicio");
     }, 2000);
 
-    // 3) Volver a la pestaña de Chrome
-    document.addEventListener("visibilitychange", () => {
-        if (document.hidden) return;
-        if (!isAllowedUrl()) return;
-        scanForCurrent("pestana visible");
-    });
-
+    // -------------------------
+    // DEBUG: imprimir cache siempre (no depende de URL)
+    // -------------------------
     if (DEBUG_CACHE_EVERY_MS > 0) {
         setInterval(() => {
-            console.log(
-                "[Control Plazos][CACHE] Fecha real fin:",
-                window.CONTROL_PLAZOS_FECHA_REAL_FIN
-            );
+            console.log("[Control Plazos][CACHE] Fecha real fin:", window.CONTROL_PLAZOS_FECHA_REAL_FIN);
         }, DEBUG_CACHE_EVERY_MS);
     }
 
