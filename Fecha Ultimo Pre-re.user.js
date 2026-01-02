@@ -313,7 +313,10 @@
 
     if (DEBUG_CACHE_EVERY_MS > 0) {
         setInterval(() => {
-            console.log("[Control Plazos][CACHE] Fecha real fin:", window.CONTROL_PLAZOS_FECHA_REAL_FIN);
+            console.log(
+                "[Control Plazos][CACHE] Fecha real fin:",
+                window.CONTROL_PLAZOS_FECHA_REAL_FIN
+            );
         }, DEBUG_CACHE_EVERY_MS);
     }
 
