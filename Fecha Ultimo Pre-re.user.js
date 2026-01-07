@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
-// @version      1.4.0
+// @version      2.0
 // @description  Lee la lista relacionada "Pre-requisitos" y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en contenido visible (incluye modal flotante). Cache por pestaña (sessionStorage) y por recordId. Borra cache si no hay tabla o fecha.
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
@@ -30,11 +30,15 @@
     // Re-escaneo por cambios internos (ordenar / paginar / refrescos)
     const RESCAN_DEBOUNCE_MS = 350;
 
+    const STORAGE_KEY_LAST = "CONTROL_PLAZOS_FECHA_REAL_FIN:__LAST__";
+
+
     function isAllowedUrl() {
         const p = location.pathname;
         return (
             /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/view$/.test(p) ||
-            /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/related\/Prerequisites__r\/view$/.test(p)
+            /^\/lightning\/r\/Constructive_project__c\/[a-zA-Z0-9]{15,18}\/related\/Prerequisites__r\/view$/.test(p) ||
+            /^\/lightning\/cmp\/c__nnssCreatePrerequisito$/.test(p)
         );
     }
 
@@ -75,10 +79,68 @@
         return `${dd}/${mm}/${yyyy}`;
     }
 
-    function getRecordIdFromUrl() {
-        const m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\//i);
-        return m ? m[1] : null;
+    function setCacheForRecord(recordId, valueOrNull) {
+        const id18 = toId18(recordId) || recordId;
+        const id15 = id18 ? id18.slice(0, 15) : null;
+
+        const k18 = id18 ? getStorageKey(id18) : null;
+        const k15 = id15 ? getStorageKey(id15) : null;
+
+        if (valueOrNull) {
+            if (k18) sessionStorage.setItem(k18, valueOrNull);
+            if (k15) sessionStorage.setItem(k15, valueOrNull);
+            sessionStorage.setItem(STORAGE_KEY_LAST, valueOrNull);
+            window.CONTROL_PLAZOS_FECHA_REAL_FIN = valueOrNull;
+        } else {
+            if (k18) sessionStorage.removeItem(k18);
+            if (k15) sessionStorage.removeItem(k15);
+            // no borrar LAST
+            window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
+        }
     }
+
+    function restoreCacheForRecord(recordId) {
+        const id18 = toId18(recordId) || recordId;
+        const id15 = id18 ? id18.slice(0, 15) : null;
+
+        const k18 = id18 ? getStorageKey(id18) : null;
+        const k15 = id15 ? getStorageKey(id15) : null;
+
+        const v =
+              (k18 && sessionStorage.getItem(k18)) ||
+              (k15 && sessionStorage.getItem(k15)) ||
+              sessionStorage.getItem(STORAGE_KEY_LAST);
+
+        window.CONTROL_PLAZOS_FECHA_REAL_FIN = v || null;
+        if (v) console.log("[Control Plazos] Cache restaurado:", v);
+    }
+
+
+
+
+    function getRecordIdFromUrl() {
+        // 1) Caso normal: /lightning/r/Constructive_project__c/<id>/...
+        let m = location.href.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\//i);
+        if (m) return toId18(m[1]) || m[1];
+
+        // 2) Caso CMP: parentId o ws
+        try {
+            const qs = new URLSearchParams(location.search || "");
+            const parentId = qs.get("c__parentId");
+            if (parentId && /^[a-zA-Z0-9]{15,18}$/.test(parentId)) return toId18(parentId) || parentId;
+
+            const ws = qs.get("ws");
+            if (ws) {
+                const decodedWs = decodeURIComponent(ws);
+                const m2 = decodedWs.match(/\/lightning\/r\/Constructive_project__c\/([a-zA-Z0-9]{15,18})\//i);
+                if (m2) return toId18(m2[1]) || m2[1];
+            }
+        } catch (e) {}
+
+        return null;
+    }
+
+
 
     function getVisibleTabPanel() {
         return (
@@ -156,28 +218,45 @@
         return { foundTable: true, dateStr: formatDDMMYYYY(maxDate), table };
     }
 
+
+    function toId18(id) {
+        const s = (id || "").trim();
+        if (s.length === 18) return s;
+        if (s.length !== 15) return null;
+
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345";
+        let suffix = "";
+
+        for (let i = 0; i < 3; i++) {
+            let flags = 0;
+            for (let j = 0; j < 5; j++) {
+                const c = s.charAt(i * 5 + j);
+                if (c >= "A" && c <= "Z") flags |= (1 << j);
+            }
+            suffix += chars.charAt(flags);
+        }
+        return s + suffix;
+    }
+
+
     function getStorageKey(recordId) {
         return STORAGE_KEY_PREFIX + recordId;
     }
 
-    function setCacheForRecord(recordId, valueOrNull) {
-        const k = getStorageKey(recordId);
-
-        if (valueOrNull) {
-            sessionStorage.setItem(k, valueOrNull);
-            window.CONTROL_PLAZOS_FECHA_REAL_FIN = valueOrNull;
-        } else {
-            sessionStorage.removeItem(k);
-            window.CONTROL_PLAZOS_FECHA_REAL_FIN = null;
-        }
+    function isCreatePrerequisitoCmpUrl() {
+        return /^\/lightning\/cmp\/c__nnssCreatePrerequisito$/.test(location.pathname);
     }
+
+
+
 
     function restoreCacheForRecord(recordId) {
         const k = getStorageKey(recordId);
-        const v = sessionStorage.getItem(k);
+        const v = sessionStorage.getItem(k) || sessionStorage.getItem(STORAGE_KEY_LAST);
         window.CONTROL_PLAZOS_FECHA_REAL_FIN = v || null;
-        if (v) console.log("[Control Plazos] Cache restaurado desde sessionStorage:", v);
+        if (v) console.log("[Control Plazos] Cache restaurado:", v);
     }
+
 
     // Evita que 2 escaneos en paralelo se pisen
     let scanToken = 0;
@@ -246,12 +325,29 @@
         } catch {}
     }
 
+    function isPrerequisitesRelatedListUrl() {
+        return /\/related\/Prerequisites__r\/view$/.test(location.pathname);
+    }
+
+
     function scanForCurrent(reason) {
         if (!isAllowedUrl()) return;
         if (document.visibilityState !== "visible") return;
 
         const recordId = getRecordIdFromUrl();
-        if (!recordId) return;
+        if (!recordId) {
+            const last = sessionStorage.getItem(STORAGE_KEY_LAST);
+            window.CONTROL_PLAZOS_FECHA_REAL_FIN = last || null;
+            return;
+        }
+
+
+        // En CREATE no hay tabla: no reescaneamos ni tocamos cache.
+        if (isCreatePrerequisitoCmpUrl()) {
+            restoreCacheForRecord(recordId);
+            console.log("[Fecha real fin] Key:", `${ONLY_OBJECT_API}:${recordId}`, "| CREATE: usando cache:", window.CONTROL_PLAZOS_FECHA_REAL_FIN || null);
+            return;
+        }
 
         const keyForLog = `${ONLY_OBJECT_API}:${recordId}`;
 
@@ -266,7 +362,6 @@
 
             const roots = getScanRoots();
 
-            // Si hay modal, nos interesa enganchar observer al modal actual
             const modalNow = getVisibleModalContainer();
             if (modalNow) attachModalObserver(modalNow);
 
@@ -286,8 +381,8 @@
             }
 
             if (best.foundTable && !best.dateStr) {
-                setCacheForRecord(recordId, null);
-                console.log("[Fecha real fin] Key:", keyForLog, "| No hay fecha | origen:", reason);
+                // Importante: no borrar cache si no hay fecha.
+                console.log("[Fecha real fin] Key:", keyForLog, "| No hay fecha | origen:", reason, "| cache se mantiene:", sessionStorage.getItem(getStorageKey(recordId)) || null);
                 attachTableObserver(best.table);
                 return;
             }
@@ -295,13 +390,13 @@
             if (attempts < SCAN_MAX_ATTEMPTS) {
                 setTimeout(attempt, SCAN_DELAY_MS);
             } else {
-                //setCacheForRecord(recordId, null);
-                console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason);
+                console.log("[Fecha real fin] Key:", keyForLog, "| No se ha encontrado la tabla | origen:", reason, "| cache se mantiene:", sessionStorage.getItem(getStorageKey(recordId)) || null);
             }
         }
 
         attempt();
     }
+
 
     // Estado de contexto (para detectar cambios internos de Salesforce sin recargar)
     let lastPath = null;
@@ -358,13 +453,18 @@
     if (DEBUG_CACHE_EVERY_MS > 0) {
         setInterval(() => {
             const rid = getRecordIdFromUrl();
-            const key = rid ? getStorageKey(rid) : "(sin recordId)";
-            const val = rid ? sessionStorage.getItem(getStorageKey(rid)) : null;
-            console.log("[Control Plazos][CACHE]", "| Fecha real fin:", val || null);
-            //console.log("[Control Plazos][CACHE] Fecha de aceptacion", window.CONTROL_PLAZOS_FECHA_ACEPTACION);
+            const valByRid = rid ? sessionStorage.getItem(getStorageKey(rid)) : null;
+            const valLast = sessionStorage.getItem(STORAGE_KEY_LAST);
 
+            console.log("[Control Plazos][CACHE]",
+                        "| rid:", rid || null,
+                        "| por rid:", valByRid || null,
+                        "| last:", valLast || null,
+                        "| window:", window.CONTROL_PLAZOS_FECHA_REAL_FIN || null
+                       );
         }, DEBUG_CACHE_EVERY_MS);
     }
+
 
     console.log("[Control Plazos] Script Fecha real fin cargado (persistente, cache por recordId, modal ok)");
 })();
