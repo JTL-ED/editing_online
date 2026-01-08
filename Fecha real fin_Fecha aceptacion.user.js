@@ -716,10 +716,10 @@
 
     // ----------------------------------------
     // MODULO 3: UI Create Prerrequisito
-    // (popover debajo del input + rellenar fecha inicio)
+    // (popover debajo del input + rellenar fechas)
     // ----------------------------------------
     (function () {
-        "use strict";
+        //"use strict"; //"use strict" activa el modo estricto de JavaScript solo en el ámbito donde aparece.
 
         const MODAL_ID = "cp_fecha_picker_modal";
         let suppressNextOpen = false;
@@ -731,8 +731,200 @@
             return RX_NEW.test(location.pathname);
         }
 
-        // === Helpers de "Fecha de inicio" ===
+        // Campos
         const START_DATE_NAME = "Start_date__c";
+        const EXPECTED_DATE_NAME = "Expected_date__c";
+
+        // =========================================================
+        // Festivos (editar a mano). Formato: "YYYY-MM-DD"
+        // =========================================================
+        const CP_HOLIDAYS = [
+            // "2026-01-01",
+            // "2026-01-06",
+        ];
+
+        // Opciones del popover para Expected_date__c
+        // kind: "bdays" = dias laborables (salta findes + festivos)
+        // kind: "months" = meses calendario y ajusta a siguiente laborable
+        const EXPECTED_OPTIONS = [
+            { label: "10 dias", kind: "bdays", value: 10 },
+            { label: "15 dias", kind: "bdays", value: 15 },
+            { label: "1 mes",  kind: "months", value: 1 },
+            { label: "2 meses", kind: "months", value: 2 },
+        ];
+
+
+
+
+        function pad2(n) { return String(n).padStart(2, "0"); }
+
+        function ymdKey(d) {
+            return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+        }
+
+        function buildHolidaySet() {
+            const set = new Set();
+            for (const s of CP_HOLIDAYS) {
+                if (typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s.trim())) set.add(s.trim());
+            }
+            return set;
+        }
+
+        let CP_HOLIDAY_SET = buildHolidaySet();
+
+        function isWorkingDay(d) {
+            const day = d.getDay();
+            if (day === 0 || day === 6) return false;
+            return !CP_HOLIDAY_SET.has(ymdKey(d));
+        }
+
+        function addBusinessDays(dateObj, days) {
+            const d = new Date(dateObj.getFullYear(), dateObj.getMonth(), dateObj.getDate());
+            const step = days >= 0 ? 1 : -1;
+            let remaining = Math.abs(days);
+            while (remaining > 0) {
+                d.setDate(d.getDate() + step);
+                if (isWorkingDay(d)) remaining--;
+            }
+            return d;
+        }
+
+        function addMonthsCalendarAndAdjust(dateObj, months) {
+            const y = dateObj.getFullYear();
+            const m = dateObj.getMonth();
+            const day = dateObj.getDate();
+
+            let d = new Date(y, m + months, day);
+
+            while (!isWorkingDay(d)) {
+                d.setDate(d.getDate() + 1);
+            }
+            return d;
+        }
+
+
+        function parseDateFromInput(text) {
+            if (text == null) return null;
+
+            // Normaliza espacios raros (NBSP)
+            const s0 = String(text).replace(/\u00A0/g, " ").trim();
+            if (!s0) return null;
+
+            // Mapa meses ES (abreviatura 3 letras)
+            const MONTHS_ES = {
+                ene: 0, feb: 1, mar: 2, abr: 3, may: 4, jun: 5,
+                jul: 6, ago: 7, sep: 8, oct: 9, nov: 10, dic: 11
+            };
+
+            // 0) Buscar dd-mmm-yyyy (ej: 08-dic-2025) incluso si hay texto alrededor
+            // admite separador '-' o '/' y admite "dic." con punto
+            let m = s0.toLowerCase().match(/(\d{1,2})\s*[-\/]\s*([a-zñ]{3})\.?\s*[-\/]\s*(\d{4})/);
+            if (m) {
+                const dd = parseInt(m[1], 10);
+                const mon = m[2];
+                const yy = parseInt(m[3], 10);
+                if (MONTHS_ES.hasOwnProperty(mon)) {
+                    const d = new Date(yy, MONTHS_ES[mon], dd);
+                    if (!isNaN(d.getTime())) return d;
+                }
+            }
+
+            // 1) yyyy-mm-dd exacto
+            m = s0.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+            if (m) {
+                const yy = parseInt(m[1], 10);
+                const mm = parseInt(m[2], 10) - 1;
+                const dd = parseInt(m[3], 10);
+                const d = new Date(yy, mm, dd);
+                if (!isNaN(d.getTime())) return d;
+            }
+
+            // 2) dd/mm/yyyy dentro del texto
+            m = s0.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+            if (m) {
+                const dd = parseInt(m[1], 10);
+                const mm = parseInt(m[2], 10) - 1;
+                const yy = parseInt(m[3], 10);
+                const d = new Date(yy, mm, dd);
+                if (!isNaN(d.getTime())) return d;
+            }
+
+            // 3) dd-mm-yyyy dentro del texto
+            m = s0.match(/(\d{1,2})-(\d{1,2})-(\d{4})/);
+            if (m) {
+                const dd = parseInt(m[1], 10);
+                const mm = parseInt(m[2], 10) - 1;
+                const yy = parseInt(m[3], 10);
+                const d = new Date(yy, mm, dd);
+                if (!isNaN(d.getTime())) return d;
+            }
+
+            return null;
+        }
+
+        function formatDateDDMMMYYYY_ES(d) {
+            const MONS = ["ene","feb","mar","abr","may","jun","jul","ago","sep","oct","nov","dic"];
+            return `${pad2(d.getDate())}-${MONS[d.getMonth()]}-${d.getFullYear()}`;
+        }
+
+
+        function readInputText(el) {
+            if (!el) return "";
+
+            // 1) lo normal
+            try {
+                const v1 = (el.value != null) ? String(el.value) : "";
+                if (v1.trim()) return v1;
+            } catch (_) {}
+
+            try {
+                const v2 = el.getAttribute ? (el.getAttribute("value") || "") : "";
+                if (String(v2).trim()) return String(v2);
+            } catch (_) {}
+
+            // 2) Lightning: a veces el valor esta en el componente padre (custom element)
+            //    Subimos por el DOM y probamos a leer .value del host
+            try {
+                const host = el.closest && el.closest("lightning-input, lightning-input-field, lightning-datepicker, lightning-input-rich-text, lightning-combobox");
+                if (host && typeof host.value === "string" && host.value.trim()) {
+                    return host.value.trim();
+                }
+
+                // 3) Lightning: a veces hay otro input interno (distinto del que has pillado)
+                if (host && host.querySelector) {
+                    const inner = host.querySelector('input.slds-input');
+                    if (inner) {
+                        const iv = (inner.value != null) ? String(inner.value) : "";
+                        if (iv.trim()) return iv.trim();
+
+                        const ia = inner.getAttribute ? (inner.getAttribute("value") || "") : "";
+                        if (String(ia).trim()) return String(ia).trim();
+                    }
+
+                    // 4) Ultimo recurso: algunos componentes ponen el texto en un elemento con title/aria-label
+                    const withTitle = host.querySelector('[title], [aria-label]');
+                    if (withTitle) {
+                        const t = (withTitle.getAttribute("title") || withTitle.getAttribute("aria-label") || "").trim();
+                        if (t) return t;
+                    }
+                }
+            } catch (_) {}
+
+            // 5) Ultimo ultimo recurso: si el input tiene title/aria-label
+            try {
+                const t2 = (el.getAttribute("title") || el.getAttribute("aria-label") || "").trim();
+                if (t2) return t2;
+            } catch (_) {}
+
+            return "";
+        }
+
+
+
+
+        function formatDateDDMMYYYY(d) {
+            return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}`;
+        }
 
         function* walkDeep(root, opts = {}) {
             const MAX_NODES = opts.maxNodes ?? 2000;
@@ -763,21 +955,34 @@
             }
         }
 
-        function findStartDateInput() {
-            // 1) directo por name
-            let el = document.querySelector(`input.slds-input[name="${START_DATE_NAME}"]`);
+        function findInputByName(name) {
+            let el = document.querySelector(`input.slds-input[name="${name}"]`);
             if (el) return el;
 
-            // 2) deep (shadow roots)
             for (const n of walkDeep(document, { maxNodes: 3000, maxDepth: 6 })) {
                 try {
                     if (!n.querySelectorAll) continue;
-                    el = n.querySelector(`input.slds-input[name="${START_DATE_NAME}"]`);
+                    el = n.querySelector(`input.slds-input[name="${name}"]`);
                     if (el) return el;
                 } catch (_) {}
             }
             return null;
         }
+
+        function getBaseDateForExpected(expectedInputEl) {
+            // SIEMPRE usar Start_date__c como base (Expected no se usa como referencia)
+            const startInput = findInputByName(START_DATE_NAME);
+            const rawStart = readInputText(startInput);
+            const base = parseDateFromInput(rawStart);
+
+            if (base) return { base, source: "start", raw: rawStart };
+
+            console.log("[expected_date][debug] rawStart:", rawStart);
+            return { base: null, source: "none", raw: "" };
+        }
+
+
+
 
         function writeDateTextValue(el, text) {
             try {
@@ -793,122 +998,38 @@
                 } catch (_) {}
                 return true;
             } catch (e) {
-                console.warn("[start_date] write error:", e);
+                console.warn("[cp_popover] write error:", e);
                 return false;
             }
         }
 
-        // Estado UI
-        // Estado UI
+        // =========================================================
+        // Popover unico (estado)
+        // =========================================================
         let pickerOpen = false;
         let panelEl = null;
-        let activeInputEl = null; // NUEVO: input que disparo el popover
+        let activeInputEl = null;
+        let activeMode = null; // "start" | "expected"
 
-function closePickerModal() {
-    const el = document.getElementById(MODAL_ID);
-    if (el) el.remove();
-    panelEl = null;
-    activeInputEl = null; // NUEVO
-}
+        function closePickerModal() {
+            const el = document.getElementById(MODAL_ID);
+            if (el) el.remove();
+            panelEl = null;
+            activeInputEl = null;
+            activeMode = null;
+        }
 
-
-
-
-
-        function buildPopover(anchorRect) {
-            const wrap = document.createElement("div");
-            wrap.id = MODAL_ID;
-
-            // contenedor fijo, sin backdrop
-            wrap.style.position = "fixed";
-            wrap.style.zIndex = "999999";
-            wrap.style.left = "0";
-            wrap.style.top = "0";
-            wrap.style.width = "0";
-            wrap.style.height = "0";
-
-            // Panel blanco (estilo Salesforce)
-            const panel = document.createElement("div");
-            panel.style.position = "fixed";
-            panel.style.background = "#fff";
-            panel.style.border = "1px solid rgba(0,0,0,0.12)";
-            panel.style.borderRadius = "12px";                // AJUSTE: radio de borde (mas pequeño = mas compacto)
-            panel.style.boxShadow = "0 12px 35px rgba(0,0,0,0.18)";
-            panel.style.padding = "8px";                      // AJUSTE: padding general del panel (reduce tamaño visual)
-            panel.style.display = "flex";
-            panel.style.gap = "10px";                         // AJUSTE: separación entre columnas (reduce/incrementa)
-            panel.style.alignItems = "flex-start";
-
-            // ancho: parecido al ejemplo (panel con scroll interno)
-            const minW = 320;                                 // AJUSTE: ancho mínimo del popover
-            const maxW = 480;                                 // AJUSTE: ancho máximo del popover
-            const extraW = 0;                                 // AJUSTE: extra respecto al input (0 = casi igual que input)
-            const desiredW = Math.max(minW, Math.min(maxW, anchorRect.width + extraW));
-            panel.style.width = desiredW + "px";
-
-            // posicion: debajo del input
-            const offset = 6;                                 // AJUSTE: distancia vertical debajo del input
-            let top = anchorRect.bottom + offset;
-            let left = anchorRect.left;
-
-            // evitar salirse por la derecha
-            if (left + desiredW > window.innerWidth - 8) {
-                left = Math.max(8, window.innerWidth - desiredW - 8);
-            }
-
-            // alto maximo + scroll (como tu ejemplo)
-            const maxH = 220;                                 // AJUSTE: altura máxima del popover (mas pequeño = menos “modal”)
-            const maxHReal = Math.min(maxH, window.innerHeight - top - 10);
-            panel.style.maxHeight = maxHReal + "px";
-            panel.style.overflow = "hidden";                  // el scroll lo hara la columna derecha
-
-            // si no cabe abajo, sube arriba
-            if (maxHReal < 140) {                              // AJUSTE: umbral para decidir “subir arriba”
-                const upH = 200;                               // AJUSTE: cuanto sube si no cabe abajo
-                top = Math.max(8, anchorRect.top - offset - upH);
-            }
-
-            panel.style.left = Math.round(left) + "px";
-            panel.style.top = Math.round(top) + "px";
-
-            // Columna izquierda: titulo
-            const leftCol = document.createElement("div");
-            leftCol.style.minWidth = "120px";                 // AJUSTE: ancho mínimo de la columna izquierda
-            leftCol.style.maxWidth = "140px";                 // AJUSTE: ancho máximo de la columna izquierda
-            leftCol.style.fontSize = "13px";                  // AJUSTE: tamaño de texto de la columna izquierda
-            leftCol.style.color = "#2e2e2e";
-            leftCol.style.lineHeight = "1.2";
-
-            const title = document.createElement("div");
-            title.innerHTML = 'Selección&nbsp;de<br>fecha:';
-            //title.innerHTML = 'Selección&nbsp;del<br>Pre-requisito:';
-            title.style.fontWeight = "600";
-            title.style.marginTop = "2px";
-
-            leftCol.appendChild(title);
-
-            // Columna derecha: grid con scroll interno
-            const rightCol = document.createElement("div");
-            rightCol.style.flex = "1";
-            rightCol.style.maxHeight = (maxHReal - 6) + "px";  // AJUSTE: altura interna para el scroll de la lista
-            rightCol.style.overflow = "auto";
-            rightCol.style.paddingRight = "4px";               // AJUSTE: margen derecho para scrollbar
-
-            const grid = document.createElement("div");
-            grid.style.display = "grid";
-            grid.style.gridTemplateColumns = "repeat(2, minmax(130px, 1fr))"; // AJUSTE: tamaño mínimo de cada “tile”
-            grid.style.gap = "8px";                            // AJUSTE: separación entre tiles
-
-            function mkTile(text) {
+        function mkTileFactory() {
+            return function mkTile(text) {
                 const b = document.createElement("button");
                 b.type = "button";
                 b.textContent = text;
                 b.style.background = "#f7f8fb";
                 b.style.border = "1px solid rgba(0,0,0,0.14)";
-                b.style.borderRadius = "12px";                 // AJUSTE: radio de cada botón
-                b.style.padding = "8px 10px";                  // AJUSTE: padding del botón (reduce altura/ancho visual)
+                b.style.borderRadius = "12px";
+                b.style.padding = "8px 10px";
                 b.style.cursor = "pointer";
-                b.style.fontSize = "12px";                     // AJUSTE: tamaño de letra del botón
+                b.style.fontSize = "12px";
                 b.style.color = "#2e2e2e";
                 b.style.textAlign = "center";
                 b.style.whiteSpace = "nowrap";
@@ -917,21 +1038,119 @@ function closePickerModal() {
                 b.onmouseenter = () => (b.style.background = "#eef2ff");
                 b.onmouseleave = () => (b.style.background = "#f7f8fb");
                 return b;
+            };
+        }
+
+        function buildPopover(anchorRect, mode) {
+            const wrap = document.createElement("div");
+            wrap.id = MODAL_ID;
+
+            wrap.style.position = "fixed";
+            wrap.style.zIndex = "999999";
+            wrap.style.left = "0";
+            wrap.style.top = "0";
+            wrap.style.width = "0";
+            wrap.style.height = "0";
+
+            const panel = document.createElement("div");
+            panel.style.position = "fixed";
+            panel.style.background = "#fff";
+            panel.style.border = "1px solid rgba(0,0,0,0.12)";
+            panel.style.borderRadius = "12px";
+            panel.style.boxShadow = "0 12px 35px rgba(0,0,0,0.18)";
+            panel.style.padding = "8px";
+            panel.style.display = "flex";
+            panel.style.gap = "10px";
+            panel.style.alignItems = "flex-start";
+
+            const minW = 320;
+            const maxW = 480;
+            const extraW = 0;
+            const desiredW = Math.max(minW, Math.min(maxW, anchorRect.width + extraW));
+            panel.style.width = desiredW + "px";
+
+            const offset = 6;
+            let top = anchorRect.bottom + offset;
+            let left = anchorRect.left;
+
+            if (left + desiredW > window.innerWidth - 8) {
+                left = Math.max(8, window.innerWidth - desiredW - 8);
             }
 
-            // Botones (los mismos ids logicos que ya usas)
-            const bAceptacion = mkTile("Fecha de Aceptación");
-            const bFinal = mkTile("Fecha Último cierre PRE");
-            const bCancel = mkTile("Cancelar");
+            const maxH = 220;
+            const maxHReal = Math.min(maxH, window.innerHeight - top - 10);
+            panel.style.maxHeight = maxHReal + "px";
+            panel.style.overflow = "hidden";
 
-            grid.appendChild(bAceptacion);
-            grid.appendChild(bFinal);
+            if (maxHReal < 140) {
+                const upH = 200;
+                top = Math.max(8, anchorRect.top - offset - upH);
+            }
 
-            // AJUSTE: si quieres que "Cancelar" ocupe todo el ancho (como el selector nativo), descomenta estas 2 lineas:
-            bCancel.style.gridColumn = "1 / -1";               // AJUSTE: hace que Cancelar sea una fila completa
-            // bCancel.style.textAlign = "center";             // AJUSTE: centrar el texto (ya esta centrado)
+            panel.style.left = Math.round(left) + "px";
+            panel.style.top = Math.round(top) + "px";
 
-            grid.appendChild(bCancel);
+            const leftCol = document.createElement("div");
+            leftCol.style.minWidth = "120px";
+            leftCol.style.maxWidth = "140px";
+            leftCol.style.fontSize = "13px";
+            leftCol.style.color = "#2e2e2e";
+            leftCol.style.lineHeight = "1.2";
+
+            const title = document.createElement("div");
+            title.style.fontWeight = "600";
+            title.style.marginTop = "2px";
+            title.innerHTML = mode === "start" ? "Seleccion<br>fecha:" : "Ajuste<br>plazo:";
+            leftCol.appendChild(title);
+
+            const rightCol = document.createElement("div");
+            rightCol.style.flex = "1";
+            rightCol.style.maxHeight = (maxHReal - 6) + "px";
+            rightCol.style.overflow = "auto";
+            rightCol.style.paddingRight = "4px";
+
+            const grid = document.createElement("div");
+            grid.style.display = "grid";
+            grid.style.gridTemplateColumns = "repeat(2, minmax(130px, 1fr))";
+            grid.style.gap = "8px";
+
+            const mkTile = mkTileFactory();
+
+
+            //Regla general
+            //Por cada nueva opcion “X dias”:
+            //Nuevo boton: buttons.bX = mkTile("X dias")
+            //Nuevo handler: applyExpectedDelta(..., "dX")
+            //Nuevo caso: if (kind === "dX") addBusinessDays(..., X)
+
+
+            let buttons = {};
+
+            if (mode === "start") {
+                buttons.bAceptacion = mkTile("Fecha de Aceptacion");
+                buttons.bFinal = mkTile("Fecha Ultimo cierre PRE");
+                buttons.bCancel = mkTile("Cancelar");
+                grid.appendChild(buttons.bAceptacion);
+                grid.appendChild(buttons.bFinal);
+                buttons.bCancel.style.gridColumn = "1 / -1";
+                grid.appendChild(buttons.bCancel);
+            } else {
+                // Genera botones a partir de EXPECTED_OPTIONS
+                buttons.expected = [];
+
+                for (const opt of EXPECTED_OPTIONS) {
+                    const b = mkTile(opt.label);
+                    b.dataset.cpKind = opt.kind;
+                    b.dataset.cpValue = String(opt.value);
+                    buttons.expected.push(b);
+                    grid.appendChild(b);
+                }
+
+                buttons.bCancel = mkTile("Cancelar");
+                buttons.bCancel.style.gridColumn = "1 / -1";
+                grid.appendChild(buttons.bCancel);
+            }
+
 
             rightCol.appendChild(grid);
 
@@ -940,10 +1159,8 @@ function closePickerModal() {
 
             wrap.appendChild(panel);
 
-            return { wrap, panel, bAceptacion, bFinal, bCancel };
+            return { wrap, panel, buttons };
         }
-
-
 
         function cleanup() {
             document.removeEventListener("mousedown", onDocClick, true);
@@ -954,27 +1171,23 @@ function closePickerModal() {
             closePickerModal();
         }
 
-function onDocClick(ev) {
-    const t = ev.target;
+        function onDocClick(ev) {
+            const t = ev.target;
 
-    // Si el click es dentro del panel, no cerrar
-    if (panelEl && panelEl.contains(t)) return;
+            if (panelEl && panelEl.contains(t)) return;
 
-    // Si el click es en el input que abrio el popover (o dentro de el), no cerrar
-    if (activeInputEl) {
-        try {
-            const p = ev.composedPath ? ev.composedPath() : null;
-            if (p && p.includes(activeInputEl)) return;
-        } catch (_) {}
+            if (activeInputEl) {
+                try {
+                    const p = ev.composedPath ? ev.composedPath() : null;
+                    if (p && p.includes(activeInputEl)) return;
+                } catch (_) {}
+                if (t === activeInputEl) return;
+                if (activeInputEl.contains && activeInputEl.contains(t)) return;
+            }
 
-        if (t === activeInputEl) return;
-        if (activeInputEl.contains && activeInputEl.contains(t)) return;
-    }
-
-    pickerOpen = false;
-    cleanup();
-}
-
+            pickerOpen = false;
+            cleanup();
+        }
 
         function onKey(ev) {
             if (ev.key === "Escape") {
@@ -988,70 +1201,109 @@ function onDocClick(ev) {
             cleanup();
         }
 
+        function applyExpectedDelta(expectedInputEl, kind, value) {
+            CP_HOLIDAY_SET = buildHolidaySet();
 
-        function showPickerModalForInput(inputEl) {
+            const info = getBaseDateForExpected(expectedInputEl);
+
+            if (!info.base) {
+                console.log("[expected_date] No se puede calcular: Expected y Start vacios o invalidos.");
+                return;
+            }
+
+            let out = null;
+
+            if (kind === "bdays") out = addBusinessDays(info.base, value);
+            if (kind === "months") out = addMonthsCalendarAndAdjust(info.base, value);
+
+            if (!out) return;
+
+            const txt = formatDateDDMMMYYYY_ES(out);
+            suppressNextOpen = true;
+            writeDateTextValue(expectedInputEl, txt);
+
+            console.log("[expected_date] Base:", formatDateDDMMYYYY(info.base), "origen:", info.source, "=>", kind, value, "=>", txt);
+        }
+
+
+
+        function showPickerModalForInput(inputEl, mode) {
             if (!inputEl) return;
             if (pickerOpen) return;
 
             pickerOpen = true;
-            activeInputEl = inputEl; // NUEVO
+            activeInputEl = inputEl;
+            activeMode = mode;
 
             closePickerModal();
 
             const rect = inputEl.getBoundingClientRect();
-            const built = buildPopover(rect);
+            const built = buildPopover(rect, mode);
 
             panelEl = built.panel;
 
-            const { wrap, bAceptacion, bFinal, bCancel } = built;
+            const { wrap, buttons } = built;
 
-            // listeners solo mientras esta abierto
             document.addEventListener("mousedown", onDocClick, true);
             document.addEventListener("keydown", onKey, true);
             window.addEventListener("scroll", onReflow, true);
             window.addEventListener("resize", onReflow, true);
 
-            bCancel.addEventListener("click", () => {
+            // Cancelar
+            buttons.bCancel.addEventListener("click", () => {
                 pickerOpen = false;
                 cleanup();
             });
 
-            bAceptacion.addEventListener("click", () => {
-                const v = window.CONTROL_PLAZOS_FECHA_ACEPTACION || null;
-                if (!v) {
-                    console.log("[start_date] Fecha de Aceptacion: cache null");
+            if (mode === "start") {
+                buttons.bAceptacion.addEventListener("click", () => {
+                    const v = window.CONTROL_PLAZOS_FECHA_ACEPTACION || null;
+                    if (!v) {
+                        console.log("[start_date] Fecha de Aceptacion: cache null");
+                        pickerOpen = false;
+                        cleanup();
+                        return;
+                    }
+                    suppressNextOpen = true;
+                    writeDateTextValue(inputEl, v);
+                    console.log("[start_date] Rellenado con Fecha de Aceptacion:", v);
                     pickerOpen = false;
                     cleanup();
-                    return;
-                }
-                suppressNextOpen = true;
+                });
 
-                writeDateTextValue(inputEl, v);
-                console.log("[start_date] Rellenado con Fecha de Aceptacion:", v);
-                pickerOpen = false;
-                cleanup();
-            });
-
-            bFinal.addEventListener("click", () => {
-                const v = window.CONTROL_PLAZOS_FECHA_REAL_FIN || null;
-                if (!v) {
-                    console.log("[start_date] Fecha Ultimo cierre PRE: cache null");
+                buttons.bFinal.addEventListener("click", () => {
+                    const v = window.CONTROL_PLAZOS_FECHA_REAL_FIN || null;
+                    if (!v) {
+                        console.log("[start_date] Fecha Ultimo cierre PRE: cache null");
+                        pickerOpen = false;
+                        cleanup();
+                        return;
+                    }
+                    suppressNextOpen = true;
+                    writeDateTextValue(inputEl, v);
+                    console.log("[start_date] Rellenado con Fecha Ultimo cierre PRE:", v);
                     pickerOpen = false;
                     cleanup();
-                    return;
+                });
+            } else {
+                // Conecta todos los botones generados
+                if (buttons.expected && buttons.expected.length) {
+                    for (const b of buttons.expected) {
+                        b.addEventListener("click", () => {
+                            const kind = b.dataset.cpKind;
+                            const value = parseInt(b.dataset.cpValue, 10);
+                            applyExpectedDelta(inputEl, kind, value);
+                            pickerOpen = false;
+                            cleanup();
+                        });
+                    }
                 }
-                suppressNextOpen = true;
-                writeDateTextValue(inputEl, v);
-                console.log("[start_date] Rellenado con Fecha Ultimo cierre PRE:", v);
-                pickerOpen = false;
-                cleanup();
-            });
+            }
+
 
             document.body.appendChild(wrap);
 
-            // opcional: foco para que ESC funcione sin click previo
-            //wrap.tabIndex = -1;
-            //wrap.focus();
+            // NO focus al popover (permite escribir en el input)
         }
 
         function pathHas(el, ev) {
@@ -1062,33 +1314,43 @@ function onDocClick(ev) {
             return false;
         }
 
-        // Abrir al enfocar el campo en CREATE
+        // Listener unico: detecta que input es
         document.addEventListener("focusin", (ev) => {
             if (!isCreateUrl()) return;
 
-            const input = findStartDateInput();
-            if (!input) return;
-
-            if (suppressNextOpen) {
-                suppressNextOpen = false; // solo bloquea UNA vez
-                return;
-            }
+            const startInput = findInputByName(START_DATE_NAME);
+            const expectedInput = findInputByName(EXPECTED_DATE_NAME);
 
             const t = ev.target;
 
-            const hit =
-                  (t === input) ||
-                  pathHas(input, ev) || // importante para shadow DOM
-                  (t && t.closest && t.closest(`input[name="${START_DATE_NAME}"]`) === input) || // click/focus en wrapper cercano
-                  (input.contains && input.contains(t)); // deja esto como ultimo fallback
+            function hit(inputEl, name) {
+                if (!inputEl) return false;
+                return (
+                    (t === inputEl) ||
+                    pathHas(inputEl, ev) ||
+                    (t && t.closest && t.closest(`input[name="${name}"]`) === inputEl) ||
+                    (inputEl.contains && inputEl.contains(t))
+                );
+            }
 
-            if (!hit) return;
+            if (suppressNextOpen) {
+                suppressNextOpen = false;
+                return;
+            }
 
+            if (hit(startInput, START_DATE_NAME)) {
+                setTimeout(() => showPickerModalForInput(startInput, "start"), 0);
+                return;
+            }
 
-            setTimeout(() => showPickerModalForInput(input), 0);
+            if (hit(expectedInput, EXPECTED_DATE_NAME)) {
+                setTimeout(() => showPickerModalForInput(expectedInput, "expected"), 0);
+                return;
+            }
         }, true);
 
     })();
+
 
 
 })();
