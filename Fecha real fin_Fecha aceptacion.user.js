@@ -870,28 +870,59 @@
         function readInputText(el) {
             if (!el) return "";
 
-            // 1) lo normal
+            // 1) valor directo del input
             try {
                 const v1 = (el.value != null) ? String(el.value) : "";
-                if (v1.trim()) return v1;
+                if (v1.trim()) return v1.trim();
             } catch (_) {}
 
             try {
                 const v2 = el.getAttribute ? (el.getAttribute("value") || "") : "";
-                if (String(v2).trim()) return String(v2);
+                if (String(v2).trim()) return String(v2).trim();
             } catch (_) {}
 
-            // 2) Lightning: a veces el valor esta en el componente padre (custom element)
-            //    Subimos por el DOM y probamos a leer .value del host
+            // 2) Subir por el shadow DOM (getRootNode().host) hasta encontrar un host Lightning
+            //    Esto SI atraviesa boundaries de shadowRoot, a diferencia de closest()
+            function findLightningHostAcrossShadow(node) {
+                try {
+                    let cur = node;
+                    for (let i = 0; i < 10 && cur; i++) {
+                        // Si el nodo actual ya es un host Lightning conocido
+                        const tag = (cur.tagName || "").toLowerCase();
+                        if (tag === "lightning-input" ||
+                            tag === "lightning-input-field" ||
+                            tag === "lightning-datepicker" ||
+                            tag === "lightning-combobox") {
+                            return cur;
+                        }
+
+                        // Subir al host del shadowRoot si existe
+                        const root = cur.getRootNode ? cur.getRootNode() : null;
+                        if (root && root.host) {
+                            cur = root.host;
+                            continue;
+                        }
+
+                        // Si no hay host, subir DOM normal
+                        cur = cur.parentNode || null;
+                    }
+                } catch (_) {}
+                return null;
+            }
+
+            const host = findLightningHostAcrossShadow(el);
+
+            // 3) Leer value del host (a veces Lightning guarda ahi la fecha)
             try {
-                const host = el.closest && el.closest("lightning-input, lightning-input-field, lightning-datepicker, lightning-input-rich-text, lightning-combobox");
                 if (host && typeof host.value === "string" && host.value.trim()) {
                     return host.value.trim();
                 }
+            } catch (_) {}
 
-                // 3) Lightning: a veces hay otro input interno (distinto del que has pillado)
+            // 4) Buscar un input interno dentro del host (si existe)
+            try {
                 if (host && host.querySelector) {
-                    const inner = host.querySelector('input.slds-input');
+                    const inner = host.querySelector("input");
                     if (inner) {
                         const iv = (inner.value != null) ? String(inner.value) : "";
                         if (iv.trim()) return iv.trim();
@@ -900,8 +931,8 @@
                         if (String(ia).trim()) return String(ia).trim();
                     }
 
-                    // 4) Ultimo recurso: algunos componentes ponen el texto en un elemento con title/aria-label
-                    const withTitle = host.querySelector('[title], [aria-label]');
+                    // 5) Ultimo recurso: title/aria-label
+                    const withTitle = host.querySelector("[title], [aria-label]");
                     if (withTitle) {
                         const t = (withTitle.getAttribute("title") || withTitle.getAttribute("aria-label") || "").trim();
                         if (t) return t;
@@ -909,7 +940,7 @@
                 }
             } catch (_) {}
 
-            // 5) Ultimo ultimo recurso: si el input tiene title/aria-label
+            // 6) Ultimo ultimo recurso: en el propio input
             try {
                 const t2 = (el.getAttribute("title") || el.getAttribute("aria-label") || "").trim();
                 if (t2) return t2;
@@ -955,18 +986,29 @@
         }
 
         function findInputByName(name) {
-            let el = document.querySelector(`input.slds-input[name="${name}"]`);
+            // 1) intento directo sin exigir class (mas robusto)
+            let el = document.querySelector(`input[name="${name}"]`);
             if (el) return el;
 
-            for (const n of walkDeep(document, { maxNodes: 3000, maxDepth: 6 })) {
+            // 2) fallback con la clase por si acaso
+            el = document.querySelector(`input.slds-input[name="${name}"]`);
+            if (el) return el;
+
+            // 3) deep scan (shadow roots)
+            for (const n of walkDeep(document, { maxNodes: 4000, maxDepth: 7 })) {
                 try {
-                    if (!n.querySelectorAll) continue;
+                    if (!n.querySelector) continue;
+
+                    el = n.querySelector(`input[name="${name}"]`);
+                    if (el) return el;
+
                     el = n.querySelector(`input.slds-input[name="${name}"]`);
                     if (el) return el;
                 } catch (_) {}
             }
             return null;
         }
+
 
         function getBaseDateForExpected(expectedInputEl) {
             // SIEMPRE usar Start_date__c como base (Expected no se usa como referencia)
@@ -1039,11 +1081,12 @@
                 return b;
             };
         }
+        // Ajuste manual del popover (en píxeles)
+        const POPOVER_SHIFT_X = 0; // positivo = derecha, negativo = izquierda
+        const POPOVER_SHIFT_Y = 0; // positivo = abajo, negativo = arriba
 
         function buildPopover(anchorRect, mode) {
-            // Ajuste manual del popover (en píxeles)
-            const POPOVER_SHIFT_X = 0; // positivo = derecha, negativo = izquierda
-            const POPOVER_SHIFT_Y = 0; // positivo = abajo, negativo = arriba
+
 
             const wrap = document.createElement("div");
             wrap.id = MODAL_ID;
@@ -1174,35 +1217,64 @@
             setTimeout(() => { suppressNextOpen = false; }, 0);
             closePickerModal();
         }
-        
-        function getFieldHost(el) {
-    try {
-        return el && el.closest
-            ? el.closest("lightning-input, lightning-input-field, lightning-datepicker, lightning-combobox")
-            : null;
-    } catch (_) {
-        return null;
-    }
-}
+
+        function isClickOnStartOrExpected(ev) {
+            try {
+                const t = ev.target;
+                if (!t) return false;
+
+                // 1) Click directamente en un input con name Start/Expected
+                if (t.closest) {
+                    if (t.closest(`input[name="${START_DATE_NAME}"]`)) return true;
+                    if (t.closest(`input[name="${EXPECTED_DATE_NAME}"]`)) return true;
+                }
+
+                // 2) Click dentro del host Lightning del campo (solo el host cercano al click)
+                const host = t.closest
+                ? t.closest("lightning-input-field, lightning-input, lightning-datepicker, lightning-combobox")
+                : null;
+
+                if (host && host.querySelector) {
+                    if (host.querySelector(`input[name="${START_DATE_NAME}"]`)) return true;
+                    if (host.querySelector(`input[name="${EXPECTED_DATE_NAME}"]`)) return true;
+                }
+
+                // 3) Shadow DOM: composedPath, pero solo revisando hosts Lightning (no contenedores gigantes)
+                const p = ev.composedPath ? ev.composedPath() : null;
+                if (p && p.length) {
+                    for (const n of p) {
+                        if (!n || !n.querySelector || !n.matches) continue;
+
+                        // Solo considerar hosts "pequenos" de campos, no document/body/div enormes
+                        if (!n.matches("lightning-input-field, lightning-input, lightning-datepicker, lightning-combobox")) continue;
+
+                        if (n.querySelector(`input[name="${START_DATE_NAME}"]`)) return true;
+                        if (n.querySelector(`input[name="${EXPECTED_DATE_NAME}"]`)) return true;
+                    }
+                }
+
+                return false;
+            } catch (_) {
+                return false;
+            }
+        }
 
 
         function onDocClick(ev) {
             const t = ev.target;
 
+            // Click dentro del panel: no cerrar
             if (panelEl && panelEl.contains(t)) return;
 
-            if (activeInputEl) {
-                try {
-                    const p = ev.composedPath ? ev.composedPath() : null;
-                    if (p && p.includes(activeInputEl)) return;
-                } catch (_) {}
-                if (t === activeInputEl) return;
-                if (activeInputEl.contains && activeInputEl.contains(t)) return;
-            }
+            // Click dentro de Start/Expected (aunque Lightning re-renderice el input): no cerrar
+            if (isClickOnStartOrExpected(ev)) return;
 
+            // Click fuera: cerrar
             pickerOpen = false;
             cleanup();
         }
+
+
 
         function onKey(ev) {
             if (ev.key === "Escape") {
@@ -1244,7 +1316,29 @@
 
         function showPickerModalForInput(inputEl, mode) {
             if (!inputEl) return;
-            if (pickerOpen) return;
+
+            const existingWrap = document.getElementById(MODAL_ID);
+
+            // Caso A: ya esta abierto para el mismo modo/campo
+            // - No cierres
+            // - Refresca referencia (Lightning puede re-renderizar input)
+            // - Si el DOM del popover desaparecio, lo recreas
+            if (pickerOpen && activeMode === mode) {
+                activeInputEl = inputEl;
+
+                if (!existingWrap) {
+                    // estaba "abierto" en estado, pero el DOM ya no existe -> recrear
+                    pickerOpen = false;
+                } else {
+                    return;
+                }
+            }
+
+            // Caso B: esta abierto pero es otro modo/campo -> cerrar y reabrir
+            if (pickerOpen) {
+                pickerOpen = false;
+                cleanup();
+            }
 
             pickerOpen = true;
             activeInputEl = inputEl;
@@ -1253,6 +1347,7 @@
             closePickerModal();
 
             const rect = inputEl.getBoundingClientRect();
+
             const built = buildPopover(rect, mode);
 
             panelEl = built.panel;
@@ -1329,42 +1424,108 @@
             return false;
         }
 
-        // Listener unico: detecta que input es
-        document.addEventListener("focusin", (ev) => {
+
+        document.addEventListener("pointerdown", (ev) => {
             if (!isCreateUrl()) return;
 
-            const startInput = findInputByName(START_DATE_NAME);
-            const expectedInput = findInputByName(EXPECTED_DATE_NAME);
+            // Si clicas dentro del popover, no reabrir
+            try {
+                const p0 = ev.composedPath ? ev.composedPath() : null;
+                if (p0 && p0.length) {
+                    for (const n of p0) {
+                        if (n && n.id === MODAL_ID) return;
+                    }
+                } else if (panelEl && panelEl.contains(ev.target)) {
+                    return;
+                }
+            } catch (_) {}
 
-            const t = ev.target;
-
-            function hit(inputEl, name) {
-                if (!inputEl) return false;
-                return (
-                    (t === inputEl) ||
-                    pathHas(inputEl, ev) ||
-                    (t && t.closest && t.closest(`input[name="${name}"]`) === inputEl) ||
-                    (inputEl.contains && inputEl.contains(t))
-                );
-            }
-
+            // Si vienes de una escritura programatica (al elegir boton), no reabrir en ese click
             if (suppressNextOpen) {
                 suppressNextOpen = false;
                 return;
             }
 
-            if (hit(startInput, START_DATE_NAME)) {
+            const p = ev.composedPath ? ev.composedPath() : null;
+
+            let startInput = null;
+            let expectedInput = null;
+
+            // 1) Buscar INPUT en el composedPath (esto funciona con shadow DOM)
+            if (p && p.length) {
+                for (const n of p) {
+                    if (!n) continue;
+
+                    if (n.tagName === "INPUT") {
+                        const nm = n.getAttribute && n.getAttribute("name");
+                        if (nm === START_DATE_NAME) {
+                            startInput = n;
+                            break;
+                        }
+                        if (nm === EXPECTED_DATE_NAME) {
+                            expectedInput = n;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (startInput) {
                 setTimeout(() => showPickerModalForInput(startInput, "start"), 0);
                 return;
             }
-
-            if (hit(expectedInput, EXPECTED_DATE_NAME)) {
+            if (expectedInput) {
                 setTimeout(() => showPickerModalForInput(expectedInput, "expected"), 0);
+                return;
+            }
+
+            // 2) Si el click cae sobre un host Lightning dentro del path, buscar el input dentro del host
+            if (p && p.length) {
+                for (const n of p) {
+                    if (!n || !n.querySelector || !n.matches) continue;
+
+                    if (!n.matches("lightning-input-field, lightning-input, lightning-datepicker, lightning-combobox")) continue;
+
+                    const s = n.querySelector(`input[name="${START_DATE_NAME}"]`);
+                    if (s) {
+                        setTimeout(() => showPickerModalForInput(s, "start"), 0);
+                        return;
+                    }
+
+                    const e = n.querySelector(`input[name="${EXPECTED_DATE_NAME}"]`);
+                    if (e) {
+                        setTimeout(() => showPickerModalForInput(e, "expected"), 0);
+                        return;
+                    }
+                }
+            }
+
+            // 3) Ultimo fallback: busca por todo el documento
+            const s2 = findInputByName(START_DATE_NAME);
+            const e2 = findInputByName(EXPECTED_DATE_NAME);
+
+            // Aqui solo abrimos si el click fue sobre el propio campo (lo mas aproximado posible)
+            // Si no podemos detectarlo, mejor no abrir para no abrir en cualquier click de la pagina.
+            if (s2 && s2 === ev.target) {
+                setTimeout(() => showPickerModalForInput(s2, "start"), 0);
+                return;
+            }
+            if (e2 && e2 === ev.target) {
+                setTimeout(() => showPickerModalForInput(e2, "expected"), 0);
                 return;
             }
         }, true);
 
+
+
     })();
+
+
+
+    // ----------------------------------------
+    // MODULO 4: UI Create Prerrequisito
+    //
+    // ----------------------------------------
 
 
     (function() {
@@ -1892,8 +2053,8 @@
         }
 
         // Ajuste manual del picker (px)
-        const NAME_PICKER_SHIFT_X = -700; // + derecha, - izquierda
-        const NAME_PICKER_SHIFT_Y = +60; // + abajo, - arriba
+        const NAME_PICKER_SHIFT_X = 0; // + derecha, - izquierda
+        const NAME_PICKER_SHIFT_Y = +10; // + abajo, - arriba
 
         function positionPickerNear(host, wrap){
             const r = host.getBoundingClientRect?.();
