@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Control Plazos - Fecha real fin + Fecha aceptacion
+// @name         Control Plazos - Fecha real fin + Fecha aceptacion + UI fecha + pre (auto fecha)
 // @namespace    sf-control-plazos
 // @version      1.2.6
 // @description  Integra dos funciones: (1) Ultima "Fecha real fin" desde related list Pre-requisitos (Constructive_project__c) con cache por recordId y soporte CMP create. (2) "Fecha de Aceptacion" (Record__c) con la misma logica original 1.3.1 (cache unico persistente).
@@ -715,7 +715,7 @@
 
 
     // ----------------------------------------
-    // MODULO 3: UI Create Prerrequisito
+    // MODULO 3: UI popover fechas
     // (popover debajo del input + rellenar fechas)
     // ----------------------------------------
     (function () {
@@ -734,6 +734,9 @@
         // Campos
         const START_DATE_NAME = "Start_date__c";
         const EXPECTED_DATE_NAME = "Expected_date__c";
+        const ENABLE_START_DATE_POPOVER = false;
+        const ENABLE_EXPECTED_DATE_POPOVER = true;
+
 
         // =========================================================
         // Festivos (editar a mano). Formato: "YYYY-MM-DD"
@@ -747,9 +750,11 @@
         // kind: "bdays" = dias laborables (salta findes + festivos)
         // kind: "months" = meses calendario y ajusta a siguiente laborable
         const EXPECTED_OPTIONS = [
-            { label: "10 dias", kind: "bdays", value: 10 },
-            { label: "15 dias", kind: "bdays", value: 15 },
-            { label: "1 mes",  kind: "months", value: 1 },
+            { label: "10 dias (laboral)", kind: "bdays", value: 10 },
+            { label: "15 dias (laboral)", kind: "bdays", value: 15 },
+            { label: "30 dias (laboral)", kind: "bdays", value: 30 },
+            { label: "60 dias (laboral)", kind: "bdays", value: 60 },
+            { label: "1 mes", kind: "months", value: 1 },
             { label: "2 meses", kind: "months", value: 2 },
             { label: "3 meses", kind: "months", value: 3 },
         ];
@@ -817,16 +822,27 @@
 
             // 0) Buscar dd-mmm-yyyy (ej: 08-dic-2025) incluso si hay texto alrededor
             // admite separador '-' o '/' y admite "dic." con punto
-            let m = s0.toLowerCase().match(/(\d{1,2})\s*[-\/]\s*([a-zñ]{3})\.?\s*[-\/]\s*(\d{4})/);
+            let m = s0.toLowerCase().match(/(\d{1,2})\s*[-\/]\s*([a-zñ]{3,4})\.?\s*[-\/]\s*(\d{4})/);
             if (m) {
                 const dd = parseInt(m[1], 10);
-                const mon = m[2];
+                let mon = m[2];
+
+                // Normalizaciones frecuentes
+                // "sept" -> "sep" (a veces Lightning/usuarios lo ponen asi)
+                // "set"  -> "sep" (catalan)
+                if (mon === "sept") mon = "sep";
+                if (mon === "set") mon = "sep";
+
+                // Si viene con 4 letras tipo "sept", por seguridad corta a 3
+                if (mon.length > 3) mon = mon.slice(0, 3);
+
                 const yy = parseInt(m[3], 10);
                 if (MONTHS_ES.hasOwnProperty(mon)) {
                     const d = new Date(yy, MONTHS_ES[mon], dd);
                     if (!isNaN(d.getTime())) return d;
                 }
             }
+
 
             // 1) yyyy-mm-dd exacto
             m = s0.match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -1210,7 +1226,8 @@
         }
 
         function cleanup() {
-            document.removeEventListener("mousedown", onDocClick, true);
+            //document.removeEventListener("mousedown", onDocClick, true);
+            document.removeEventListener("pointerdown", onDocClick, true);
             document.removeEventListener("keydown", onKey, true);
             window.removeEventListener("scroll", onReflow, true);
             window.removeEventListener("resize", onReflow, true);
@@ -1263,16 +1280,20 @@
         function onDocClick(ev) {
             const t = ev.target;
 
-            // Click dentro del panel: no cerrar
+            // Click dentro del wrap/panel: no cerrar
+            const wrap = document.getElementById(MODAL_ID);
+            if (wrap && (wrap === t || wrap.contains(t))) return;
+
             if (panelEl && panelEl.contains(t)) return;
 
-            // Click dentro de Start/Expected (aunque Lightning re-renderice el input): no cerrar
+            // Click dentro de Start/Expected: no cerrar
             if (isClickOnStartOrExpected(ev)) return;
 
             // Click fuera: cerrar
             pickerOpen = false;
             cleanup();
         }
+
 
 
 
@@ -1291,26 +1312,47 @@
         function applyExpectedDelta(expectedInputEl, kind, value) {
             CP_HOLIDAY_SET = buildHolidaySet();
 
-            const info = getBaseDateForExpected(expectedInputEl);
+            function doCalcAndWrite(info) {
+                let out = null;
 
-            if (!info.base) {
-                console.log("[expected_date] No se puede calcular: Expected y Start vacios o invalidos.");
+                if (kind === "bdays") out = addBusinessDays(info.base, value);
+                if (kind === "months") out = addMonthsCalendarAndAdjust(info.base, value);
+
+                if (!out) return;
+
+                const txt = formatDateDDMMMYYYY_ES(out);
+                suppressNextOpen = true;
+                writeDateTextValue(expectedInputEl, txt);
+
+                console.log("[expected_date] Base:", formatDateDDMMYYYY(info.base), "origen:", info.source, "=>", kind, value, "=>", txt);
+            }
+
+            let info = getBaseDateForExpected(expectedInputEl);
+
+            if (info.base) {
+                doCalcAndWrite(info);
                 return;
             }
 
-            let out = null;
+            // Reintento: Lightning a veces aun no ha fijado el value del Start
+            let tries = 0;
+            const timer = setInterval(() => {
+                tries++;
+                info = getBaseDateForExpected(expectedInputEl);
 
-            if (kind === "bdays") out = addBusinessDays(info.base, value);
-            if (kind === "months") out = addMonthsCalendarAndAdjust(info.base, value);
+                if (info.base) {
+                    clearInterval(timer);
+                    doCalcAndWrite(info);
+                    return;
+                }
 
-            if (!out) return;
-
-            const txt = formatDateDDMMMYYYY_ES(out);
-            suppressNextOpen = true;
-            writeDateTextValue(expectedInputEl, txt);
-
-            console.log("[expected_date] Base:", formatDateDDMMYYYY(info.base), "origen:", info.source, "=>", kind, value, "=>", txt);
+                if (tries >= 3) {
+                    clearInterval(timer);
+                    console.log("[expected_date] No se puede calcular: Start vacio o invalido.");
+                }
+            }, 120);
         }
+
 
 
 
@@ -1354,7 +1396,8 @@
 
             const { wrap, buttons } = built;
 
-            document.addEventListener("mousedown", onDocClick, true);
+            //document.addEventListener("mousedown", onDocClick, true);
+            document.addEventListener("pointerdown", onDocClick, true);
             document.addEventListener("keydown", onKey, true);
             window.addEventListener("scroll", onReflow, true);
             window.addEventListener("resize", onReflow, true);
@@ -1471,12 +1514,21 @@
             }
 
             if (startInput) {
-                setTimeout(() => showPickerModalForInput(startInput, "start"), 0);
+                if (ENABLE_START_DATE_POPOVER) {
+                    setTimeout(() => showPickerModalForInput(startInput, "start"), 0);
+                }
                 return;
             }
+
             if (expectedInput) {
-                setTimeout(() => showPickerModalForInput(expectedInput, "expected"), 0);
+
+                if (ENABLE_EXPECTED_DATE_POPOVER) {
+                    setTimeout(() => showPickerModalForInput(expectedInput, "expected"), 0);
+
+                }
                 return;
+
+
             }
 
             // 2) Si el click cae sobre un host Lightning dentro del path, buscar el input dentro del host
@@ -1530,6 +1582,9 @@
 
     (function() {
         const MODAL_WHITELIST = new Set(['01/01', '01/07','03/07']);
+        // ——— Auto-relleno de Fecha de inicio ———
+        const START_DATE_NAME = 'Start_date__c';
+        const START_DATE_SKIP_SET = new Set(['FASE OBRA','OBRA BACKLOG']);
 
         const NAME_RULES = {
             '01/01': [{label: 'PART', write: 'PART', key: 'PART_Acciones' }, 'REQ ORG CLIENT', 'DIVISIO', 'REHABILITACIO'],
@@ -1588,9 +1643,9 @@
         const NAME_LABEL_RX = /Nombre del Pre-?requisito/i;
         const COMM_LABEL_RX = /Comunicaci[oó]n al cliente\s*\(push\)/i;
 
+
         // Detectores de contexto (URL) //Create
         //const RX_NEW = /\/lightning\/o\/Prerequisite__c\/create(?:\?|$)/i;
-        //const RX_CREATE = /\/lightning\/cmp\/c__nnssCreatePrerequisito(?:\?|$)/i;
         const RX_NEW = /\/lightning\/cmp\/c__nnssCreatePrerequisito(?:\?|$)/i;
         const RX_EDIT = /\/lightning\/r\/Prerequisite__c\/[^/]+\/edit(?:\?|$)/i;
         const RX_VIEW = /\/lightning\/r\/Prerequisite__c\/[^/]+\/view(?:\?|$)/i;
@@ -1705,7 +1760,6 @@
         async function pickEstudiVariant() {
             const sorted = [...ESTUDI_VARIANTS].sort((a,b) => collator.compare(a.label||'', b.label||''));
             await resetFieldsDeferred(2);
-            await delay(100);
             return await showChoiceModal('Seleccione Pre-requisito (ESTUDI)', sorted);
         }
 
@@ -1718,6 +1772,15 @@
                 COMM_PENDING = false;
                 applyComm(); // 真正调用
             }, 160);// （可选）把通信的防抖再宽一点
+        }
+
+        function resetStartDateState({ forceClear = false } = {}) {
+            _startDateAutofilledOnce = false;
+            _startDateWasAuto = false;
+            if (forceClear) {
+                const el = findStartDateInput();
+                if (el) writeDateTextValue(el, '');
+            }
         }
 
         function* walkDeep(root, opts = {}) {
@@ -1800,6 +1863,12 @@
                 return false;
             }
         }
+
+
+
+
+
+
 
         // —— Builder de modal genérico —— //
         async function showModal({ title, bodyHTML, actions }) {
@@ -2002,6 +2071,7 @@
         }
 
         function delay(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
         function validateCombo(host){
             try { if (typeof host.reportValidity === 'function') return host.reportValidity(); }
             catch(_) {}
@@ -2052,32 +2122,15 @@
             ST._insidePickerClick = false;
         }
 
-        // Ajuste manual del picker (px)
-        const NAME_PICKER_SHIFT_X = 0; // + derecha, - izquierda
-        const NAME_PICKER_SHIFT_Y = +10; // + abajo, - arriba
-
         function positionPickerNear(host, wrap){
-            const r = host.getBoundingClientRect?.();
-            if (!r) return;
-
+            const r = host.getBoundingClientRect?.(); if (!r) return;
             const w = wrap.offsetWidth || 240;
             const gapX = 8, gapY = 8;
-
             let left = Math.min(r.right + gapX, innerWidth - w - 8);
             let top = Math.max(8, r.top);
-
-            // Aplica offset
-            left += NAME_PICKER_SHIFT_X;
-            top += NAME_PICKER_SHIFT_Y;
-
-            // Re-clamp para no salirse tras el offset
-            left = Math.min(Math.max(8, left), innerWidth - w - 8);
-            top = Math.min(Math.max(8, top), innerHeight - (wrap.offsetHeight || 0) - 8);
-
             wrap.style.left = left + 'px';
             wrap.style.top = top + 'px';
         }
-
 
         function openNamePickerOnDemand(){
             if (document.getElementById('__af_name_picker_ephemeral__')) destroyPicker();
@@ -2149,6 +2202,12 @@
                             writeHostValue(ST.nameHost, entry.write);
                             ST.lastTextName = entry.write;
                             ST.lastNameKey = entry.key;
+
+                            onPrereqNameConfirmedAndMaybeResetDates();
+
+                            maybeHandleStartDateAfterNameChange();
+                            maybeHandleExpectedAfterNameChange();
+
                         }
                         ST.canAutofill = true;
                         requestApplyComm();
@@ -2202,6 +2261,12 @@
                         ST.lockNameOnce = true;
                         ST.lastTextName = 'PART';
                         ST.lastNameKey = choice.key;
+                        _nameConfirmed = true; // <-- NUEVO
+                        onPrereqNameConfirmedAndMaybeResetDates();
+
+                        maybeHandleStartDateAfterNameChange();
+                        maybeHandleExpectedAfterNameChange();
+
 
                         ensurePickHosts();
                         await setComboValue(ST.tipoHost, choice._target.tipo);
@@ -2211,6 +2276,7 @@
                             ST.nameHost = findHostByLabel(NAME_LABEL_RX, ['lightning-input']) || ST.nameHost;
                             if (ST.nameHost) writeHostValue(ST.nameHost, 'PART');
                             ST.canAutofill = true;
+
                             requestApplyComm();
                             destroyPicker();
                         }, 180);
@@ -2245,6 +2311,12 @@
                     ST.lockNameOnce = true;
                     ST.lastTextName = v.write;
                     ST.lastNameKey = v.key;
+
+                    onPrereqNameConfirmedAndMaybeResetDates();
+
+                    maybeHandleStartDateAfterNameChange();
+                    maybeHandleExpectedAfterNameChange();
+
 
                     ensurePickHosts();
                     await setComboValue(ST.tipoHost, ESTUDI_TARGET.tipo);
@@ -2286,51 +2358,24 @@
 
             const onDocDown = (e) => {
                 if (ST._insidePickerClick) return;
-
-                const wrap = document.getElementById('__af_name_picker_ephemeral__');
-                wrap.addEventListener('mousedown', () => {
-                    ST._insidePickerClick = true;
-                    queueMicrotask(() => { ST._insidePickerClick = false; });
-                }, true);
-
-                wrap.addEventListener('pointerdown', () => {
-                    ST._insidePickerClick = true;
-                    queueMicrotask(() => { ST._insidePickerClick = false; });
-                }, true);
-
-                if (!wrap) return;
-
-                // 1) Ignorar clicks en las barras de scroll del navegador
-                const onViewportScrollbar =
-                      (e.target === document.documentElement || e.target === document.body) &&
-                      (e.clientX >= window.innerWidth - 18 || e.clientY >= window.innerHeight - 18);
-                if (onViewportScrollbar) return;
-
-                // 2) Considerar "dentro" si el target está contenido en el panel
-                const insidePanel = wrap.contains(e.target);
-
-                // 3) Considerar "dentro" si el click parte del input de Nombre
-                const insideNameHost = !!(ST.nameHost && ST.nameHost.contains && ST.nameHost.contains(e.target));
-
-                if (!insidePanel && !insideNameHost) {
+                const path = e.composedPath?.() || [];
+                if (!path.includes(wrap) && !path.includes(ST.nameHost)) {
                     destroyPicker();
                     document.removeEventListener('mousedown', onDocDown, true);
                     document.removeEventListener('keydown', onKey, true);
                 }
             };
-
             const onKey = (e) => { if (e.key === 'Escape') onDocDown(e); };
             document.addEventListener('mousedown', onDocDown, true);
             document.addEventListener('keydown', onKey, true);
         }
-
         let EXEC_TOKEN = 0;
         const nextToken = () => (++EXEC_TOKEN);
+
+
         const applyName = (() => {
             let t=null;
             return async () => {
-                if (ST.mode !== 'new') return;
-
                 if (ST.modalOpen || ST.choosing) return;
                 if (!ST.canAutofill && !ST.lockNameOnce && !ST.preNameOverride) return;
                 if (!ST.subtipo) return;
@@ -2351,6 +2396,14 @@
                             writeHostValue(ST.nameHost, picked.write || '');
                             ST.lastTextName = picked.write || '';
                             ST.lastNameKey = picked.key || (picked.write || '');
+                            _nameConfirmed = !!ST.lastTextName;
+
+                            onPrereqNameConfirmedAndMaybeResetDates();
+
+                            maybeHandleStartDateAfterNameChange();
+                            maybeHandleExpectedAfterNameChange();
+
+
                         }
                         ST.lastKeyName = key;
                         requestApplyComm();
@@ -2367,8 +2420,11 @@
                         const k = key;
                         if (ST.tipo && ST.subtipo && ST.noProcShownKey !== k) {
                             ST.noProcShownKey = k;
-                            const msg = `No procede el prerrequisito con el TIPO y SUBTIPO seleccionados.`;
+                            clearStartDateIfAuto();
+                            clearExpectedIfAuto();
+                            _nameConfirmed = false; // limpiar fecha si la autocompletamos antes
                             await resetFields(3);
+                            const msg = `No procede el prerrequisito con el TIPO y SUBTIPO seleccionados.`;
                             await showNoticeModal(msg);
                         }
                         return;
@@ -2377,6 +2433,12 @@
                     if (ST.lockNameOnce) {
                         ST.lockNameOnce = false;
                         ST.lastKeyName = key;
+
+                        onPrereqNameConfirmedAndMaybeResetDates();
+
+                        maybeHandleStartDateAfterNameChange();
+                        maybeHandleExpectedAfterNameChange();
+
                         requestApplyComm();
                         return;
                     }
@@ -2385,12 +2447,21 @@
                     if (token !== EXEC_TOKEN) return; // descarta resultados obsoletos
                     if (picked === null) return;
                     const writeText = picked.write ?? picked.label ?? '';
+
                     if (writeHostValue(ST.nameHost, writeText)) {
                         ST.lastTextName = writeText;
                         ST.lastNameKey = picked.key ?? writeText;
+                        _nameConfirmed = !!ST.lastTextName; // <-- NUEVO
+
                         ST._lastHadRule = true;
                     }
                     ST.lastKeyName = key;
+
+                    onPrereqNameConfirmedAndMaybeResetDates();
+
+                    maybeHandleStartDateAfterNameChange();
+                    maybeHandleExpectedAfterNameChange();
+
                     requestApplyComm();
                 }, 120);
             };
@@ -2399,8 +2470,6 @@
         const applyComm = (() => {
             let t=null;
             return async () => {
-                if (ST.mode !== 'new') return;
-
                 if (ST.modalOpen || ST.choosing) return;
                 if (!ST.canAutofill && !ST.lockNameOnce && !ST.preNameOverride) return;
                 clearTimeout(t);
@@ -2437,8 +2506,39 @@
             };
         })();
 
+        function onNameManualCommit() {
+            if (!ST.nameHost) return;
+            const val = (ST.nameHost.value || '').trim();
+            ST.lastTextName = val;
+            ST.lastNameKey = val; // sin mapeo, usamos el texto
+            _nameConfirmed = !!val; // <-- NUEVO
+
+            onPrereqNameConfirmedAndMaybeResetDates();
+
+            maybeHandleStartDateAfterNameChange();
+            maybeHandleExpectedAfterNameChange();
+
+        }
+
+        // en install()
+        document.addEventListener('blur', (e) => {
+            const p = e.composedPath?.() || [];
+            const host = p.find(n => n && n.tagName === 'LIGHTNING-INPUT');
+            if (!host) return;
+            const label = host.label || host.getAttribute?.('label') || '';
+            if (NAME_LABEL_RX.test(label)) onNameManualCommit();
+        }, true);
+
+        document.addEventListener('change', (e) => {
+            const p = e.composedPath?.() || [];
+            const host = p.find(n => n && n.tagName === 'LIGHTNING-INPUT');
+            if (!host) return;
+            const label = host.label || host.getAttribute?.('label') || '';
+            if (NAME_LABEL_RX.test(label)) onNameManualCommit();
+        }, true);
+
+
         function onFocusIn(e){
-            if (ST.mode !== 'new') return;
             const path = e.composedPath?.() || [];
             const tag = n => n && n.tagName;
             const inputHost = path.find(n => tag(n)==='LIGHTNING-INPUT');
@@ -2475,7 +2575,6 @@
         }, true);
 
         document.addEventListener('pointerdown', (e) => {
-            if (ST.mode !== 'new') return;
             const path = e.composedPath?.() || [];
             const combo = path.find(n => n && n.tagName === 'LIGHTNING-COMBOBOX');
             if (!combo) return;
@@ -2488,7 +2587,6 @@
         }, true);
 
         document.addEventListener('click', async (e) => {
-            if (ST.mode !== 'new') return;
             if (!ST._subtipoListOpen) return;
 
             const path = e.composedPath?.() || [];
@@ -2519,6 +2617,9 @@
             if (rule === undefined) {
                 ST._subtipoListOpen = false;
                 await resetFields(3);
+                // limpiar fecha si la autocompletamos antes
+                clearStartDateIfAuto();
+                clearExpectedIfAuto();
                 await showNoticeModal('No procede el prerrequisito con el TIPO y SUBTIPO seleccionados.');
                 return;
             }
@@ -2548,10 +2649,19 @@
                 if (ST.nameHost) writeHostValue(ST.nameHost, finalWrite);
                 ST.lastTextName = finalWrite;
                 ST.lastNameKey = finalKey;
+                _nameConfirmed = !!ST.lastTextName;
+
+                onPrereqNameConfirmedAndMaybeResetDates();
+
+                maybeHandleStartDateAfterNameChange(); // ← AÑÁDELO AQUÍ si lo omitiste
+                maybeHandleExpectedAfterNameChange();
+
                 ST.canAutofill = true;
                 requestApplyComm();
                 return; // 二级路径到此结束，避免继续走一级写入
             }
+
+
 
             if (choice == null) return;
             const writeText = (typeof choice === 'object') ? (choice.write ?? choice.label ?? '') : choice;
@@ -2559,11 +2669,16 @@
             if (ST.nameHost) writeHostValue(ST.nameHost, writeText);
             ST.lastTextName = writeText;
             ST.lastNameKey = nameKey;
+            _nameConfirmed = !!ST.lastTextName;
+
+            onPrereqNameConfirmedAndMaybeResetDates();
+
+            maybeHandleStartDateAfterNameChange();
+            maybeHandleExpectedAfterNameChange();
             requestApplyComm();
         }, true);
 
         async function onPickChange(e){
-            if (ST.mode !== 'new') return;
             const path = e.composedPath?.() || [];
             const host = path.find(n => n && n.tagName === 'LIGHTNING-COMBOBOX');
             if (!host) return;
@@ -2576,6 +2691,9 @@
                 ST.tipo = val;
                 ST.canAutofill = true;
                 await resetFields(3);
+                clearStartDateIfAuto(); // ← opcional: limpiarla al cambiar Tipo
+                clearExpectedIfAuto();
+                _nameConfirmed = false;
                 return;
             }
 
@@ -2588,6 +2706,359 @@
                 requestApplyComm();
             }
         }
+
+
+        // === Estado del autofill de Start_date__c ===
+        let _startDateAutofilledOnce = false;
+        let _startDateWasAuto = false;
+        // NUEVO: solo permitimos autocompletar si ya se eligió/introdujo un nombre
+        let _nameConfirmed = false;
+
+        // =========================================================
+        // BLOQUE DE AJUSTES (reglas futuras)
+        // - Define aqui que prerrequisitos rellenan Start/Expected o no
+        // - Por defecto: si no hay regla, se aplica la logica actual
+        // =========================================================
+
+
+        //Para añadir futuras reglas (ejemplos)
+        const USE_ACCEPTACION = new Set([
+            'IE',
+            'AGP',
+        ]);
+
+        const USE_REAL_FIN = new Set([
+            'FASE OBRA',
+            'OBRA BACKLOG',
+        ]);
+
+        function getRuleForCurrentPrereqName() {
+            const raw = (ST.lastTextName || '').trim();
+            const name = raw.toUpperCase();
+
+            if (USE_REAL_FIN.has(name)) {
+                return { start:{ mode:'cache', source:'REAL_FIN' } };
+            }
+            if (USE_ACCEPTACION.has(name)) {
+                return { start:{ mode:'cache', source:'ACEPTACION' } };
+            }
+            return null; // default
+        }
+
+
+        // Origenes posibles de cache (expansible)
+        function getCacheValueBySource(source) {
+            if (source === 'REAL_FIN') return window.CONTROL_PLAZOS_FECHA_REAL_FIN || null;
+            if (source === 'ACEPTACION') return window.CONTROL_PLAZOS_FECHA_ACEPTACION || null;
+            return null;
+        }
+
+
+
+        let _lastConfirmedName = null;
+
+        function resetDatesHard() {
+            // Start
+            try {
+                const s = findStartDateInput();
+                if (s) writeDateTextValue(s, '');
+            } catch(_) {}
+            _startDateAutofilledOnce = false;
+            _startDateWasAuto = false;
+            _startDateWasCache = false;
+
+            // Expected
+            try {
+                const e = findExpectedInput();
+                if (e) writeDateTextValue(e, '');
+            } catch(_) {}
+            _expectedAutofilledOnce = false;
+            _expectedWasAuto = false;
+        }
+
+
+        function onPrereqNameConfirmedAndMaybeResetDates() {
+            if (ST.mode !== 'new') return;
+
+            const cur = (ST.lastTextName || '').trim();
+            if (!cur) return;
+
+            if (_lastConfirmedName !== null && cur !== _lastConfirmedName) {
+                resetDatesHard();
+            }
+            _lastConfirmedName = cur;
+        }
+
+
+        // Flags nuevos: para saber si Start lo puso el script via cache
+        let _startDateWasCache = false;
+
+
+
+        function shouldSkipStartDate(){
+            const rule = getRuleForCurrentPrereqName();
+            // Si hay regla y Start no es "default", entonces no hacemos el autofill "hoy"
+            if (rule && rule.start && rule.start.mode && rule.start.mode !== 'keep_default') return true;
+
+            // Mantener compatibilidad por si luego anades reglas y quieres fallback
+            const n = (ST.lastTextName || '').trim().toUpperCase();
+            return false;
+        }
+
+
+        function clearStartDateIfAuto(){
+            try{
+                const el = findStartDateInput();
+                if (!el) return;
+
+                if (_startDateWasAuto || _startDateWasCache) {
+                    writeDateTextValue(el, '');
+                    _startDateWasAuto = false;
+                    _startDateWasCache = false;
+                    _startDateAutofilledOnce = false; // permite volver a autocompletar si procede
+                }
+            }catch(_){}
+        }
+
+
+        // === Helpers de "Fecha de inicio" ===
+        function findStartDateInput() {
+            // 1) directo por atributo name
+            let el = document.querySelector(`input.slds-input[name="${START_DATE_NAME}"]`);
+            if (el) return el;
+
+            // 2) búsqueda más profunda por si el input está dentro de shadowRoots
+            for (const n of walkDeep(document, { maxNodes: 3000, maxDepth: 6 })) {
+                try {
+                    if (!n.querySelectorAll) continue;
+                    el = n.querySelector(`input.slds-input[name="${START_DATE_NAME}"]`);
+                    if (el) return el;
+                } catch (_) {}
+            }
+            return null;
+        }
+
+        function writeDateTextValue(el, text) {
+            try {
+                if (!el) return false;
+                if ((el.value || '') === text) return true;
+                el.value = text;
+                el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
+                // limpia errores si es requerido
+                try {
+                    if (typeof el.setCustomValidity === 'function') el.setCustomValidity('');
+                    if (typeof el.reportValidity === 'function') el.reportValidity();
+                } catch (_) {}
+                return true;
+            } catch (e) {
+                console.warn('[start_date] write error:', e);
+                return false;
+            }
+        }
+
+        function tryAutofillStartDate() {
+            const el = findStartDateInput();
+            if (!el) return false;
+
+            // fecha de hoy en formato dd/mm/yyyy
+            const d = new Date();
+            const dd = String(d.getDate()).padStart(2, '0');
+            const mm = String(d.getMonth() + 1).padStart(2, '0');
+            const yyyy = d.getFullYear();
+            const todayES = `${dd}/${mm}/${yyyy}`;
+            //const todayES = `${dd}-${mm}-${yyyy}`; //Otro formato de relleno de fecha.
+
+            return writeDateTextValue(el, todayES);
+        }
+
+
+
+        // Lógica central: decide si autocompletar o limpiar en función del Nombre actual
+        async function maybeHandleStartDateAfterNameChange(){
+            if (ST.mode !== 'new') return;
+            if (!_nameConfirmed) return;
+
+            const el = findStartDateInput();
+            if (!el) return;
+
+            const current = (el.value || '').trim();
+            const rule = getRuleForCurrentPrereqName();
+
+            // 1) Si hay regla de cache para Start_date y el campo esta vacio -> usar cache
+            if (rule && rule.start && rule.start.mode === 'cache') {
+                if (!current) {
+                    const cached = getCacheValueBySource(rule.start.source);
+
+                    // Si no hay cache, no escribimos nada (y NO pasamos a "hoy", porque en estas reglas
+                    // has pedido que NO se autorellene con hoy)
+                    if (!cached) {
+                        // opcional: si quieres limpiar expected auto cuando estas en estas reglas
+                        clearExpectedIfAuto();
+                        return;
+                    }
+
+                    // Normaliza formato esperado: tu cache ya viene como DD/MM/YYYY
+                    // (si algun dia lo guardas distinto, aqui lo adaptas)
+                    await delay(80);
+                    const ok = writeDateTextValue(el, String(cached).trim());
+                    if (ok) {
+                        _startDateWasCache = true;
+                        _startDateWasAuto = false;
+                        _startDateAutofilledOnce = true;
+                        // opcional: si quieres limpiar expected auto cuando estas en estas reglas
+                        clearExpectedIfAuto();
+                    }
+                }
+                return; // importante: no seguir con logica default
+            }
+
+            // 2) Logica default actual (todo lo demas)
+            // Si venias de cache antes y ya no aplica, limpia solo si lo pusimos nosotros
+            if (_startDateWasCache) {
+                // Si el usuario ya puso algo manual encima, no tocamos
+                if (!current) clearStartDateIfAuto();
+            }
+
+            // Si es una opcion "bloqueada" por reglas (en tu caso ya se gestiona arriba)
+            if (shouldSkipStartDate()){
+                clearStartDateIfAuto();
+                clearExpectedIfAuto();
+                return;
+            }
+
+            // Si esta vacio -> autocompleta hoy (una vez)
+            if (!current && !_startDateAutofilledOnce){
+                await delay(80);
+                const ok = tryAutofillStartDate();
+                _startDateAutofilledOnce = !!ok;
+                _startDateWasAuto = !!ok;
+                _startDateWasCache = false;
+            }
+        }
+
+
+
+        // === Expected_date__c (Fecha prevista fin) ===
+        const EXPECTED_DATE_NAME = 'Expected_date__c';
+
+        // Festivos opcionales (Cataluña) en formato 'YYYY-MM-DD'.
+        // Déjalo vacío o mantenlo tú a mano si quieres excluir festivos reales.
+        const HOLIDAYS_CAT = new Set([
+            // '2025-01-01', '2025-01-06', ...
+        ]);
+
+        let _expectedAutofilledOnce = false; // solo true si lo escribió el script
+        let _expectedWasAuto = false; // recuerda si el valor actual lo puso el script
+
+
+        function pad2(n){ return String(n).padStart(2,'0'); }
+
+        function formatES(d){ // dd/mm/yyyy
+            return `${pad2(d.getDate())}/${pad2(d.getMonth()+1)}/${d.getFullYear()}`;
+        }
+
+        function parseES(s){ // dd/mm/yyyy -> Date o null
+            const m = /^(\d{2})\/(\d{2})\/(\d{4})$/.exec((s||'').trim());
+            if(!m) return null;
+            const dd = +m[1], MM = +m[2]-1, yyyy = +m[3];
+            const d = new Date(yyyy, MM, dd);
+            return (d && d.getFullYear()===yyyy && d.getMonth()===MM && d.getDate()===dd) ? d : null;
+        }
+
+        function ymd(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+
+        function isWeekend(d){
+            const w = d.getDay(); // 0 dom, 6 sáb
+            return (w===0 || w===6);
+        }
+
+        function isHoliday(d){
+            return HOLIDAYS_CAT.has(ymd(d));
+        }
+
+        function addBusinessDays(start, n){
+            const out = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+            let added = 0;
+            while(added < n){
+                out.setDate(out.getDate() + 1);
+                // Si quieres contar festivos oficiales: usa !isWeekend(out) && !isHoliday(out)
+                if(!isWeekend(out) /* && !isHoliday(out) */){
+                    added++;
+                }
+            }
+            return out;
+        }
+
+        function findExpectedInput(){
+            // primero intento rápido
+            let el = document.querySelector(`input.slds-input[name="${EXPECTED_DATE_NAME}"]`);
+            if (el) return el;
+            // búsqueda profunda por shadow roots/iframes
+            for (const n of walkDeep(document, { maxNodes: 3000, maxDepth: 6 })) {
+                try{
+                    if(!n.querySelectorAll) continue;
+                    el = n.querySelector(`input.slds-input[name="${EXPECTED_DATE_NAME}"]`);
+                    if(el) return el;
+                }catch(_){}
+            }
+            return null;
+        }
+
+        function clearExpectedIfAuto(){
+            try{
+                const el = findExpectedInput();
+                if(!el) return;
+                if(_expectedWasAuto){
+                    writeDateTextValue(el, '');
+                    _expectedWasAuto = false;
+                    _expectedAutofilledOnce = false;
+                }
+            }catch(_){}
+        }
+
+
+        function isEstudiName(){
+            const v = (ST.lastTextName || '').trim().toUpperCase();
+            // Acepta "ESTUDI - ..." con espacios variables
+            return /^ESTUDI\s*-\s*/.test(v);
+        }
+
+        async function maybeHandleExpectedAfterNameChange(){
+            if (ST.mode !== 'new') return;
+
+            const el = findExpectedInput();
+            if(!el) return;
+
+            // Si ya hay valor manual, respetamos
+            const current = (el.value || '').trim();
+            if(current && !_expectedWasAuto) return;
+
+            // Si el Nombre no es ESTUDI - XXX → limpiar si lo puso el script
+            if (!isEstudiName()){
+                clearExpectedIfAuto();
+                return;
+            }
+
+            // Base: Start_date__c si existe y es válida; si no, hoy
+            const startEl = findStartDateInput?.();
+            const base =
+                  (startEl && parseES(startEl.value || '')) ||
+                  new Date();
+
+            // Sumar 10 días laborables (lun-vie) para sumar dias en prerrequisito ESTUDI - XXX
+            const target = addBusinessDays(base, 10);
+            const txt = formatES(target);
+
+            if (writeDateTextValue(el, txt)){
+                _expectedAutofilledOnce = true;
+                _expectedWasAuto = true;
+            }
+        }
+
+
+
 
         function resetFormState() {
             ST.tipo = null;
@@ -2608,6 +3079,12 @@
             ST.pickerEl = null; // por si acaso que actica choicemodal en otro sitio
             destroyPicker();
             document.getElementById('__af_modal_root__')?.remove();
+            resetStartDateState(); // <- resetea banderas de fecha al cambiar de pantalla/estado
+            _nameConfirmed = false; // <-- NUEVO
+            _lastConfirmedName = null;
+
+
+
         }
 
         function install() {
@@ -2628,41 +3105,44 @@
                     resetFormState();
 
                     // 2) Modo por URL
-                    //if (RX_NEW.test(href) || RX_CREATE.test(href)) ST.mode = 'new';
                     if (RX_NEW.test(href)) ST.mode = 'new';
                     else if (RX_EDIT.test(href)) ST.mode = 'edit';
                     else if (RX_VIEW.test(href)) ST.mode = 'view';
                     else ST.mode = 'view';
+                    if (ST.mode === 'new') resetStartDateState();
+
+
 
                     // 3) Localiza hosts y decide si autocompletar
                     setTimeout(() => {
-                        //ST.nameHost = ST.nameHost || findHostByLabel(NAME_LABEL_RX, ['lightning-input','lightning-input-field']);
-                        //ST.commHost = ST.commHost || findHostByLabel(COMM_LABEL_RX, ['lightning-textarea','lightning-input-rich-text','lightning-input-field']);
-
-                        //const nameVal = (ST.nameHost && 'value' in ST.nameHost) ? (ST.nameHost.value || '').trim() : '';
-                        //const commVal = (ST.commHost && 'value' in ST.commHost) ? (ST.commHost.value || '').trim() : '';
-
-                        // Política: en "nuevo" siempre; en "editar" solo si ambos están vacíos
-                        //if (ST.mode === 'new') {
-                        //    ST.canAutofill = true;
-                        //} else if (ST.mode === 'edit') {
-                        //    ST.canAutofill = (nameVal === '' && commVal === '');
-                        //} else {
-                        //    ST.canAutofill = false;
-                        //}
-
-                        // 4) Si procede, dispara cálculos (sin limpiar campos)
-                        //if (ST.canAutofill) {
-                        //    applyName();
-                        //    requestApplyComm();
-                        //}
-
-                        if (ST.mode !== 'new') { ST.canAutofill = false; return; }
                         ST.nameHost = ST.nameHost || findHostByLabel(NAME_LABEL_RX, ['lightning-input','lightning-input-field']);
                         ST.commHost = ST.commHost || findHostByLabel(COMM_LABEL_RX, ['lightning-textarea','lightning-input-rich-text','lightning-input-field']);
-                        ST.canAutofill = true;
-                        applyName();
-                        requestApplyComm();
+
+                        const nameVal = (ST.nameHost && 'value' in ST.nameHost) ? (ST.nameHost.value || '').trim() : '';
+                        const commVal = (ST.commHost && 'value' in ST.commHost) ? (ST.commHost.value || '').trim() : '';
+
+                        // Política: en "nuevo" siempre; en "editar" solo si ambos están vacíos
+                        if (ST.mode === 'new') {
+                            ST.canAutofill = true;
+                        } else if (ST.mode === 'edit') {
+                            ST.canAutofill = (nameVal === '' && commVal === '');
+                        } else {
+                            ST.canAutofill = false;
+                        }
+                        // 4) Si procede, dispara cálculos (sin limpiar campos)
+                        if (ST.canAutofill) {
+                            applyName();
+                            requestApplyComm();
+                        }
+                        // No autocompletar fecha al abrir: esperar a que se confirme el nombre
+                        if (ST.mode === 'new' && _nameConfirmed) {
+                            onPrereqNameConfirmedAndMaybeResetDates();
+
+                            maybeHandleStartDateAfterNameChange();
+                            maybeHandleExpectedAfterNameChange();
+                        }
+
+
                     }, 400);
                 }
             }, CHECK_INTERVAL);
@@ -2672,7 +3152,4 @@
         if (document.readyState === 'complete' || document.readyState === 'interactive') install();
         else document.addEventListener('DOMContentLoaded', install, { once:true });
     })();
-
-
-
 })();
