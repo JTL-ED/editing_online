@@ -2,7 +2,7 @@
 // @name         Fecha Ultima Fecha real fin
 // @namespace    sf-control-plazos
 // @version      2.0
-// @description  Lee la lista relacionada "Pre-requisitos" y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en contenido visible (incluye modal flotante). Cache por pestaña (sessionStorage) y por recordId. Borra cache si no hay tabla o fecha.
+// @description  Lee la lista relacionada "Prse-requisitos" y extrae la fecha mas reciente de la columna "Fecha real fin" SOLO en contenido visible (incluye modal flotante). Cache por pestaña (sessionStorage) y por recordId. Borra cache si no hay tabla o fecha.
 // @match        https://*.lightning.force.com/*
 // @match        https://*.my.salesforce.com/*
 // @run-at       document-idle
